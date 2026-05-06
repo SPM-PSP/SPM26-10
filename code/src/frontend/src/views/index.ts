@@ -8,5 +8,6 @@ export const views: Record<
   404: () => import('./_builtin/404/index.vue'),
   500: () => import('./_builtin/500/index.vue'),
   'constant-page': () => import('./_builtin/constant-page/index.vue'),
+  login: () => import('./_builtin/login/index.vue'),
   'not-found': () => import('./_builtin/not-found/index.vue')
 };
