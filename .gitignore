@@ -1,1 +1,103 @@
+# -----------------------------
+# OS / Editor
+# -----------------------------
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.bak
+.idea/
+.vscode/
+
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Conda local env folders
+.conda/
+conda-meta/
+
+# Python packaging / build artifacts
+build/
+dist/
+site/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# -----------------------------
+# Local configuration / secrets
+# -----------------------------
+.env.local
+.env.*.local
+.python-version
+
+# -----------------------------
+# Logs / runtime
+# -----------------------------
+*.log
+logs/
+nohup.out
+
+# -----------------------------
+# Frontend (Node / Vite)
+# -----------------------------
+src/frontend/node_modules/
+src/frontend/dist/
+src/frontend/.pnpm-store/
+src/frontend/.npm/
+src/frontend/.eslintcache
+src/frontend/stats.html
+
+# Vite / TS caches
+src/frontend/node_modules/.vite/
+src/frontend/*.tsbuildinfo
+
+# -----------------------------
+# Model / AI artifacts
+# -----------------------------
+src/models/
+hf_cache/
+
+# -----------------------------
+# Runtime-generated backend resources
+# -----------------------------
+src/backend/generated_resources/lesson_plans/
+src/backend/generated_resources/assessments/
+src/backend/generated_resources/practices/
+
+# -----------------------------
+# Vector database / local data
+# -----------------------------
+# data/chroma_db/
+# data/docs/
+
+# -----------------------------
+# SQL / DB local dumps
+# -----------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.sql
+*.dump
