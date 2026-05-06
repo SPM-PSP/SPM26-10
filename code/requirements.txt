@@ -1,0 +1,43 @@
+# 核心框架和AI/ML库
+torch==2.7.1
+protobuf # 用于数据序列化，部分Hugging Face库可能依赖
+
+bitsandbytes
+# Qwen3 官方建议使用较新的 transformers；低于 4.51 会遇到模型/分词器识别问题。
+transformers>=4.51.0,<5
+accelerate==0.30.1
+# tokenizers 交给 pip 按 transformers 自动解析，避免手工锁死造成冲突。
+torchvision==0.22.1 # 与 torch 2.7.1 和 cu126 兼容
+torchaudio==2.7.1 # 与 torch 2.7.1 兼容
+cpm_kernels # CodeGeeX2-6B 模型推理的特定依赖
+sentencepiece # 部分Hugging Face分词器的底层依赖
+
+# FastAPI 和 Web 服务器
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.7.1
+python-multipart==0.0.7
+
+# 数据库相关
+sqlalchemy==2.0.30
+aiomysql==0.2.0
+greenlet
+# 如果 aiomysql 遇到安装问题，可以尝试使用纯 Python 的 pymysql 替代
+# pymysql==1.1.0
+cryptography # 解决可能的间接依赖问题
+
+# RAG (检索增强生成) 相关
+langchain==0.2.3
+langchain-community==0.2.3
+chromadb==0.5.3
+# 与较新的 transformers 兼容。
+sentence-transformers==2.6.0
+
+# 文档处理库
+pypdf==4.2.0      # 用于处理 PDF 文件
+python-docx==1.1.0 # 用于处理 .docx 文件
+
+# 其他工具
+python-dotenv==1.0.1 # 用于加载 .env 环境变量
+mdtex2html # Gradio的依赖之一，用于Markdown渲染
+unstructured # 文档解析工具
