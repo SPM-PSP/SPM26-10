@@ -6,5 +6,7 @@ export const views: Record<
 > = {
   403: () => import('./_builtin/403/index.vue'),
   404: () => import('./_builtin/404/index.vue'),
-  500: () => import('./_builtin/500/index.vue')
+  500: () => import('./_builtin/500/index.vue'),
+  'constant-page': () => import('./_builtin/constant-page/index.vue'),
+  'not-found': () => import('./_builtin/not-found/index.vue')
 };
