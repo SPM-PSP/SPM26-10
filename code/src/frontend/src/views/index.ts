@@ -12,5 +12,10 @@ export const views: Record<
   'not-found': () => import('./_builtin/not-found/index.vue'),
   about: () => import('./about/index.vue'),
   dashboard_analysis: () => import('./dashboard/analysis/index.vue'),
-  dashboard_workbench: () => import('./dashboard/workbench/index.vue')
+  dashboard_workbench: () => import('./dashboard/workbench/index.vue'),
+  document_naive: () => import('./document/naive/index.vue'),
+  'document_project-link': () => import('./document/project-link/index.vue'),
+  document_project: () => import('./document/project/index.vue'),
+  document_vite: () => import('./document/vite/index.vue'),
+  document_vue: () => import('./document/vue/index.vue')
 };
