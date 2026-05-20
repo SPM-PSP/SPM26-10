@@ -16,36 +16,39 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 DOCS_DIR = os.path.join(PROJECT_ROOT, "data", "docs")  # 原始教学文档存放路径
 CHROMA_PERSIST_DIR = os.path.join(PROJECT_ROOT, "data", "chroma_db")  # 向量数据库存放
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5" # 用于生成文本嵌入的预训练模型名称
+SUPPORTED_TEXT_SUFFIXES = (".txt", ".md")
 
 DEVICE = "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") is not None or \
                     (hasattr(os, 'is_available') and torch.cuda.is_available()) else "cpu"
 
-#加载指定目录下的所有支持的文档文件（PDF,DOCX,TXT）
+#加载指定目录下的所有支持的文档文件（递归支持 PDF、DOCX、DOC、TXT、MD）
 def load_documents(directory:str)->list:
     documents=[]
     print(f"开始加载{directory}中的文档")
-    for filename in os.listdir(directory):
-        filepath=os.path.join(directory,filename)
-        if os.path.isfile(filepath):
+    for root, _, files in os.walk(directory):
+        for filename in sorted(files):
+            filepath=os.path.join(root,filename)
+            relative_path = os.path.relpath(filepath, directory)
             loader=None
-            if filename.lower().endswith(".pdf"):
+            lower_filename = filename.lower()
+            if lower_filename.endswith(".pdf"):
                 loader = PyPDFLoader(filepath)
-                print(f"  - 加载 PDF: {filename}")
-            elif filename.lower().endswith((".docx", ".doc")):
+                print(f"  - 加载 PDF: {relative_path}")
+            elif lower_filename.endswith((".docx", ".doc")):
                 loader = UnstructuredWordDocumentLoader(filepath)
-                print(f"  - 加载 DOCX/DOC: {filename}")
-            elif filename.lower().endswith(".txt"):
+                print(f"  - 加载 DOCX/DOC: {relative_path}")
+            elif lower_filename.endswith(SUPPORTED_TEXT_SUFFIXES):
                 loader = TextLoader(filepath, encoding="utf-8")
-                print(f"  - 加载 TXT: {filename}")
+                print(f"  - 加载文本: {relative_path}")
             else:
-                print(f"  - 跳过不支持的文件类型: {filename}")
+                print(f"  - 跳过不支持的文件类型: {relative_path}")
                 continue
 
             if loader:
                 try:
                     documents.extend(loader.load())
                 except Exception as e:
-                    print(f"  -错误：无法加载文件{filename}:{e}")
+                    print(f"  -错误：无法加载文件{relative_path}:{e}")
 
     print(f"共加载了{len(documents)}个文档对象")
     return documents
