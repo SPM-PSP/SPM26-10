@@ -1,12 +1,11 @@
-<!-- eslint-disable no-console -->
+<!-- eslint-disable no-console, vue/no-v-html -->
 <template>
   <div class="h-full">
     <n-card title="在线问答" :bordered="false" class="rounded-8px shadow-sm">
       <n-space vertical class="mb-4">
         <n-card size="huge" title="智能回答">
-          <div v-if="answerContent" class="answer-content">
-            {{ answerContent }}
-          </div>
+          <div v-if="answerContent" class="markdown-body answer-content" v-html="answerHtml"></div>
+          <div v-else-if="isLoading" class="text-gray-400">正在生成回答...</div>
           <div v-else class="text-gray-400">提交问题后，答案将显示在这里...</div>
         </n-card>
       </n-space>
@@ -40,11 +39,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import type { FormInst } from 'naive-ui';
+import { marked } from 'marked';
 import { formRules } from '@/utils';
-import _axios from '@/utils/request'; // 引入封装的 axios 实例
-import type { OnlineQARequestPayload, OnlineQAApiResponse } from '@/types/qa'; // 导入我们定义的类型
+import type { OnlineQARequestPayload } from '@/types/qa';
 
 // 表单引用
 const formRef = ref<FormInst | null>(null);
@@ -60,11 +59,20 @@ const questionData = reactive<OnlineQARequestPayload>({
 // 答案内容
 const answerContent = ref<string | null>(null); // 初始化为 null 方便 v-if 判断
 
+const answerHtml = computed(() => {
+  if (!answerContent.value) {
+    return '';
+  }
+  return marked.parse(answerContent.value);
+});
+
 // 表单验证规则
 // 假设 formRules 中有一个名为 `question` 的验证规则
 const question_form_rules = {
   question: formRules.question // 确保 formRules.question 存在且有效
 };
+
+const BASE_URL = import.meta.env.VITE_APP_BASE_URL || 'http://127.0.0.1:8000';
 
 // 提交处理
 const handleSubmit = async (e: MouseEvent) => {
@@ -80,19 +88,40 @@ const handleSubmit = async (e: MouseEvent) => {
       question: questionData.question
     };
 
-    // 发送请求，使用 _axios
-    const response = await _axios.post<OnlineQAApiResponse>('/api/student/ask', requestPayload);
+    const sessionId = sessionStorage.getItem('session_id');
+    const response = await fetch(`${BASE_URL}/api/student/ask/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionId ? { 'X-Session-ID': sessionId } : {})
+      },
+      body: JSON.stringify(requestPayload)
+    });
 
-    // 处理响应
-    if (response.data.status === 'success') {
-      answerContent.value = response.data.answer;
-      window.$message?.success('问题提交成功！');
-      // 可以选择清空问题输入框
-      // questionData.question = '';
-    } else {
-      // 假设后端在失败时返回 message 字段，或者使用 answer 字段作为错误信息
-      throw new Error(response.data.answer || '获取答案失败');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || `请求失败: ${response.status}`);
     }
+
+    if (!response.body) {
+      throw new Error('浏览器未返回可读取的流。');
+    }
+
+    answerContent.value = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      answerContent.value += decoder.decode(value, { stream: true });
+    }
+
+    answerContent.value += decoder.decode();
+    window.$message?.success('问题提交成功！');
   } catch (error) {
     console.error('提交问题失败:', error);
     window.$message?.error(`提交失败: ${(error as Error).message || '未知错误'}`);
@@ -105,7 +134,75 @@ const handleSubmit = async (e: MouseEvent) => {
 
 <style scoped>
 .answer-content {
-  white-space: pre-wrap; /* 保留空白符和换行符 */
   line-height: 1.6;
+}
+
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5),
+.markdown-body :deep(h6) {
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  font-weight: 700;
+}
+
+.markdown-body :deep(p) {
+  margin-bottom: 0.8em;
+  line-height: 1.7;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin-left: 20px;
+  margin-bottom: 0.8em;
+}
+
+.markdown-body :deep(li) {
+  margin-bottom: 0.4em;
+}
+
+.markdown-body :deep(pre) {
+  overflow-x: auto;
+  padding: 12px 14px;
+  margin: 0.8em 0;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.markdown-body :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.markdown-body :deep(:not(pre) > code) {
+  padding: 0.15em 0.4em;
+  border-radius: 6px;
+  background: rgb(148 163 184 / 18%);
+}
+
+.markdown-body :deep(blockquote) {
+  padding-left: 12px;
+  margin: 0.8em 0;
+  border-left: 4px solid rgb(99 102 241 / 45%);
+  color: #64748b;
+}
+
+.markdown-body :deep(table) {
+  width: 100%;
+  margin: 1em 0;
+  border-collapse: collapse;
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid #dbe2ea;
+}
+
+.markdown-body :deep(th) {
+  background: #f8fafc;
 }
 </style>

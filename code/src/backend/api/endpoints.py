@@ -1,10 +1,12 @@
 import os
 from sqlalchemy import select, func, text, and_
 from fastapi import APIRouter, HTTPException, Depends, status, Header,Query
+from fastapi.responses import StreamingResponse
 from typing import List, Optional, Dict, Any
 import uuid # 用于生成唯一ID
 import hashlib # 用于密码哈希
-from src.backend.core.llm_manager import generate_text_with_qwen3, load_qwen3_model
+import time
+from src.backend.core.llm_manager import generate_text_with_qwen3, initialize_llm_runtime, stream_text_with_qwen3
 from src.backend.rag_pipeline.vector_store_manager import initialize_vector_store
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,10 +42,10 @@ def verify_password_simple(plain_password: str, hashed_password: str) -> bool:
 def initialize_global_resources():
     global _vectorstore,_embeddings_model
 
-    #预加载CodeGeeX模型
+    # 初始化 LLM 运行模式：local 会预加载本地模型，api/hybrid 只校验远程配置
     try:
-        load_qwen3_model()
-        print("LLM模型已在应用启动时预加载")
+        initialize_llm_runtime()
+        print("LLM 运行时初始化完成。")
     except Exception as e:
         print(f"应用启动时LLM模型预加载失败: {e}")
         raise RuntimeError("LLM 模型预加载失败，应用无法启动。")
@@ -63,8 +65,9 @@ def initialize_global_resources():
 
 #封装对CodeGeeX4的调用，并处理 LLM 侧的异常
 async def _get_llm_response(system_instruction: str,user_question: str,retrieved_documents_content: List[str],
-        final_instruction: str,max_new_tokens: int = 512,temperature: float = 0.7,top_p: float = 0.9) -> str:
+        final_instruction: str,max_new_tokens: int | None = 512,temperature: float = 0.7,top_p: float = 0.9) -> str:
     try:
+        started_at = time.perf_counter()
         response = generate_text_with_qwen3(
             system_instruction=system_instruction,
             user_question=user_question,
@@ -74,6 +77,8 @@ async def _get_llm_response(system_instruction: str,user_question: str,retrieved
             temperature=temperature,
             top_p=top_p
         )
+        elapsed = time.perf_counter() - started_at
+        print(f"LLM 生成完成: elapsed={elapsed:.2f}s, docs={len(retrieved_documents_content)}, question_preview={user_question[:60]!r}")
         return response
     except Exception as e:
         print(f"LLM 生成失败: {e}")
@@ -87,9 +92,17 @@ async def _get_retrieved_docs(query: str, k: int = 5) -> List[str]:
         raise HTTPException(status_code=500, detail="向量数据库未初始化或加载失败。RAG 功能不可用。")
 
     try:
+        started_at = time.perf_counter()
         retriever = _vectorstore.as_retriever(search_kwargs={"k": k})
         all_retrieved_docs_objects = retriever.invoke(query)
-        return [doc.page_content for doc in all_retrieved_docs_objects]
+        docs = [doc.page_content for doc in all_retrieved_docs_objects]
+        elapsed = time.perf_counter() - started_at
+        first_preview = docs[0][:120].replace("\n", " ") if docs else ""
+        print(
+            f"Chroma 检索完成: elapsed={elapsed:.2f}s, k={k}, hits={len(docs)}, "
+            f"query={query[:60]!r}, first_hit_preview={first_preview!r}"
+        )
+        return docs
     except Exception as e:
         print(f"知识库检索失败: {e}")
         raise HTTPException(status_code=500, detail=f"知识库检索失败: {e}")
@@ -238,14 +251,18 @@ async def generate_lesson_plan_api(request: LessonPlanRequest,current_user: User
     {request.course_outline}
     ---
     """
-    final_instruction = "请给出详细的课程设计，格式清晰，便于教师直接使用。"
+    final_instruction = (
+        "请给出完整、详细且可直接使用的课程设计，格式清晰，便于教师直接使用。"
+        "如果内容较长，也必须完整输出，不要中途省略、不要用“以下略”“后续同理”等简写结束。"
+        "请确保最后一节内容、实践安排和时间分配完整收尾。"
+    )
 
     lesson_plan_content = await _get_llm_response(
         system_instruction=system_instruction,
         user_question=user_question,
         retrieved_documents_content=retrieved_docs_content,
         final_instruction=final_instruction,
-        max_new_tokens=1500,
+        max_new_tokens=None,
         temperature=0.7,
         top_p=0.9
     )
@@ -546,6 +563,7 @@ async def ask_student_assistant_api(request: StudentQuestionRequest,current_user
     # 任何已认证用户都可以提问
     student_id = current_user.id
     print(f"用户 {student_id} 提出了问题: {request.question}")
+    started_at = time.perf_counter()
 
     retrieved_docs_content = await _get_retrieved_docs(request.question, k=5)
 
@@ -557,13 +575,58 @@ async def ask_student_assistant_api(request: StudentQuestionRequest,current_user
         user_question=request.question,
         retrieved_documents_content=retrieved_docs_content,
         final_instruction=final_instruction,
-        max_new_tokens=500,
+        max_new_tokens=800,
         temperature=0.7,
         top_p=0.9
+    )
+    elapsed = time.perf_counter() - started_at
+    print(
+        f"学生问答完成: total_elapsed={elapsed:.2f}s, user_id={student_id}, "
+        f"docs={len(retrieved_docs_content)}, answer_preview={answer[:120]!r}"
     )
     await _log_user_activity(db, student_id, "ask_question", {"question": request.question[:100]})
 
     return StudentQuestionResponse(status="success", question=request.question, answer=answer)
+
+
+@router.post("/student/ask/stream", summary="在线学习助手：流式解答学生提出的问题")
+async def ask_student_assistant_stream_api(
+    request: StudentQuestionRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    student_id = current_user.id
+    print(f"用户 {student_id} 发起流式问答: {request.question}")
+    started_at = time.perf_counter()
+
+    retrieved_docs_content = await _get_retrieved_docs(request.question, k=5)
+    system_instruction = "你是一名专业的《嵌入式Linux开发实践教程》学习助手。请根据以下提供的知识库内容，简洁、准确、清晰地回答用户的问题。如果知识库中没有直接答案，请说明你无法根据当前知识库回答，并鼓励学生继续探索。"
+    final_instruction = "请给出你的回答："
+
+    def generate():
+        answer_chunks: List[str] = []
+        try:
+            for chunk in stream_text_with_qwen3(
+                system_instruction=system_instruction,
+                user_question=request.question,
+                retrieved_documents_content=retrieved_docs_content,
+                final_instruction=final_instruction,
+                max_new_tokens=800,
+                temperature=0.7,
+                top_p=0.9
+            ):
+                answer_chunks.append(chunk)
+                yield chunk
+        finally:
+            full_answer = "".join(answer_chunks)
+            elapsed = time.perf_counter() - started_at
+            print(
+                f"学生流式问答完成: total_elapsed={elapsed:.2f}s, user_id={student_id}, "
+                f"docs={len(retrieved_docs_content)}, answer_preview={full_answer[:120]!r}"
+            )
+
+    await _log_user_activity(db, student_id, "ask_question_stream", {"question": request.question[:100]})
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
 # 根据学生历史练习和要求生成随练题目（基于主题和数量生成，未集成复杂的学生历史练习数据分析）
 @router.post("/student/practice/generate", response_model=PracticeQuestionResponse, summary="实时练习评测助手：生成随练题目")

@@ -37,13 +37,12 @@ export const useAuthStore = defineStore('auth-store', {
       const { resetTabStore } = useTabStore();
       const { resetRouteStore } = useRouteStore();
       const route = unref(router.currentRoute);
+      const currentPath = route.fullPath;
 
       clearAuthStorage();
       this.$reset();
 
-      if (route.meta.requiresAuth) {
-        toLogin();
-      }
+      toLogin(undefined, currentPath === '/login' ? undefined : currentPath);
 
       nextTick(() => {
         resetTabStore();

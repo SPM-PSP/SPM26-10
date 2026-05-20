@@ -22,4 +22,7 @@ export function clearAuthStorage() {
   localStg.remove('token');
   localStg.remove('refreshToken');
   localStg.remove('userInfo');
+  sessionStorage.removeItem('session_id');
+  sessionStorage.removeItem('user_info');
+  localStorage.removeItem('session_id');
 }
