@@ -5,7 +5,11 @@
       class="absolute left-48px top-24px z-3 text-20px"
       @update:dark="theme.setDarkMode"
     />
-    <n-card :bordered="false" size="large" class="z-4 !w-auto rounded-20px shadow-sm">
+    <n-card
+      :bordered="false"
+      size="large"
+      :class="['z-4 !w-auto rounded-20px login-shell-card', theme.darkMode ? 'login-shell-card--dark' : 'login-shell-card--light']"
+    >
       <div class="w-300px sm:w-360px">
         <header class="flex items-center gap-20px">
           <system-logo class="text-64px text-primary" />
@@ -80,4 +84,29 @@ const bgColor = computed(() => {
 });
 </script>
 
-<style scoped></style>
+<style scoped>
+.login-shell-card {
+  transition:
+    background-color 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.login-shell-card--light {
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid rgb(255 255 255 / 78%);
+  box-shadow:
+    0 28px 70px rgb(15 23 42 / 16%),
+    0 10px 28px rgb(15 23 42 / 10%);
+  backdrop-filter: blur(12px);
+}
+
+.login-shell-card--dark {
+  background: rgb(9 14 24 / 72%);
+  border: 1px solid rgb(71 85 105 / 42%);
+  box-shadow:
+    0 32px 80px rgb(2 6 23 / 42%),
+    0 12px 30px rgb(2 6 23 / 28%);
+  backdrop-filter: blur(14px);
+}
+</style>

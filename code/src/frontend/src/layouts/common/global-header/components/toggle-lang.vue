@@ -15,19 +15,11 @@ import { localStg } from '@/utils';
 const theme = useThemeStore();
 const { locale } = useI18n();
 
-const language = ref<I18nType.LangType>(localStg.get('lang') || 'zh-CN');
+const language = ref<I18nType.LangType>('zh-CN');
 const options = [
   {
     label: '中文',
     key: 'zh-CN'
-  },
-  {
-    label: 'English',
-    key: 'en'
-  },
-  {
-    label: 'ភាសាខ្មែរ',
-    key: 'km-KH'
   }
 ];
 const handleSelect = (key: string) => {
@@ -35,5 +27,8 @@ const handleSelect = (key: string) => {
   locale.value = key;
   localStg.set('lang', key as I18nType.LangType);
 };
+
+locale.value = 'zh-CN';
+localStg.set('lang', 'zh-CN');
 </script>
 <style scoped></style>

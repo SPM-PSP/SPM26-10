@@ -1,62 +1,52 @@
 <!-- eslint-disable no-console -->
 <template>
-  <div class="flex justify-center items-center min-h-screen bg-gray-100">
-    <n-card class="w-full max-w-sm p-6 rounded-lg shadow-xl" content-style="padding: 24px;" :bordered="false">
-      <div class="text-center mb-8">
-        <h2 class="text-3xl font-bold text-gray-800 mb-2">欢迎登录</h2>
-        <p class="text-gray-500">请输入您的账户信息</p>
+  <n-form ref="formRef" :model="model" :rules="rules" size="large" :show-label="false">
+    <n-form-item path="userName">
+      <n-input v-model:value="model.userName" :placeholder="$t('page.login.common.userNamePlaceholder')" />
+    </n-form-item>
+    <n-form-item path="password">
+      <n-input
+        v-model:value="model.password"
+        type="password"
+        show-password-on="click"
+        :placeholder="$t('page.login.common.passwordPlaceholder')"
+      />
+    </n-form-item>
+
+    <n-form-item path="selectedRole">
+      <n-select v-model:value="model.selectedRole" :options="roleOptions" placeholder="请选择登录角色" />
+    </n-form-item>
+
+    <n-space :vertical="true" :size="18">
+      <div class="flex-y-center justify-between">
+        <n-checkbox v-model:checked="rememberMe">
+          {{ $t('page.login.pwdLogin.rememberMe') }}
+        </n-checkbox>
+        <n-button :text="true" @click="toLoginModule('reset-pwd')">
+          {{ $t('page.login.pwdLogin.forgetPassword') }}
+        </n-button>
       </div>
-
-      <n-form ref="formRef" :model="model" :rules="rules" size="large" :show-label="false">
-        <n-form-item path="userName">
-          <n-input v-model:value="model.userName" :placeholder="$t('page.login.common.userNamePlaceholder')">
-            <template #prefix></template>
-          </n-input>
-        </n-form-item>
-        <n-form-item path="password">
-          <n-input
-            v-model:value="model.password"
-            type="password"
-            show-password-on="click"
-            :placeholder="$t('page.login.common.passwordPlaceholder')"
-          ></n-input>
-        </n-form-item>
-
-        <n-form-item path="selectedRole">
-          <n-select v-model:value="model.selectedRole" :options="roleOptions" placeholder="请选择登录角色"></n-select>
-        </n-form-item>
-        <n-space :vertical="true" :size="24">
-          <div class="flex-y-center justify-between">
-            <n-checkbox v-model:checked="rememberMe">
-              {{ $t('page.login.pwdLogin.rememberMe') }}
-            </n-checkbox>
-            <n-button :text="true" @click="toLoginModule('reset-pwd')">
-              {{ $t('page.login.pwdLogin.forgetPassword') }}
-            </n-button>
-          </div>
-          <n-button
-            type="primary"
-            size="large"
-            :block="true"
-            :round="true"
-            :loading="loginLoading"
-            @click="handleSubmit"
-          >
-            {{ $t('page.login.common.confirm') }}
-          </n-button>
-          <div class="flex-y-center justify-between">
-            <n-button class="flex-1" :block="true" @click="toLoginModule('code-login')">
-              {{ loginModuleLabels['code-login'] }}
-            </n-button>
-            <div class="w-12px"></div>
-            <n-button class="flex-1" :block="true" @click="toLoginModule('register')">
-              {{ loginModuleLabels.register }}
-            </n-button>
-          </div>
-        </n-space>
-      </n-form>
-    </n-card>
-  </div>
+      <n-button
+        type="primary"
+        size="large"
+        :block="true"
+        :round="true"
+        :loading="loginLoading"
+        @click="handleSubmit"
+      >
+        {{ $t('page.login.common.confirm') }}
+      </n-button>
+      <div class="flex-y-center justify-between">
+        <n-button class="flex-1" :block="true" @click="toLoginModule('code-login')">
+          {{ loginModuleLabels['code-login'] }}
+        </n-button>
+        <div class="w-12px"></div>
+        <n-button class="flex-1" :block="true" @click="toLoginModule('register')">
+          {{ loginModuleLabels.register }}
+        </n-button>
+      </div>
+    </n-space>
+  </n-form>
 </template>
 
 <script setup lang="ts">
@@ -73,7 +63,6 @@ const loginModuleLabels = {
 
 // ========= Naive UI 相关 Hook =========
 const message = useMessage();
-
 // ========= Vue Router 相关 Hook =========
 const router = useRouter();
 
@@ -204,74 +193,4 @@ function toLoginModule(moduleName: string) {
 }
 </script>
 
-<style scoped>
-/* 样式保持不变 */
-.min-h-screen {
-  min-height: 100vh;
-}
-.bg-gray-100 {
-  background-color: #f8f8f8; /* 浅灰色背景 */
-}
-.shadow-xl {
-  box-shadow:
-    0 20px 25px -5px rgba(0, 0, 0, 0.1),
-    0 10px 10px -5px rgba(0, 0, 0, 0.04);
-}
-.text-gray-800 {
-  color: #333;
-}
-.text-gray-500 {
-  color: #666;
-}
-.mb-8 {
-  margin-bottom: 2rem; /* approx 32px */
-}
-.mb-2 {
-  margin-bottom: 0.5rem; /* approx 8px */
-}
-
-/* Tailwind CSS 辅助类，如果项目未使用 Tailwind，请替换为普通 CSS */
-.flex {
-  display: flex;
-}
-.justify-center {
-  justify-content: center;
-}
-.items-center {
-  align-items: center;
-}
-.w-full {
-  width: 100%;
-}
-.max-w-sm {
-  max-width: 24rem; /* 384px */
-}
-.p-6 {
-  padding: 1.5rem; /* 24px */
-}
-.rounded-lg {
-  border-radius: 0.5rem; /* 8px */
-}
-.text-center {
-  text-align: center;
-}
-.font-bold {
-  font-weight: 700;
-}
-.text-3xl {
-  font-size: 1.875rem; /* 30px */
-  line-height: 2.25rem; /* 36px */
-}
-.flex-y-center {
-  align-items: center;
-}
-.justify-between {
-  justify-content: space-between;
-}
-.flex-1 {
-  flex: 1 1 0%;
-}
-.w-12px {
-  width: 12px;
-}
-</style>
+<style scoped></style>
