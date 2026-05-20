@@ -1,12 +1,12 @@
 /** 用户相关模块 */
 declare namespace Auth {
   /**
-   * 用户角色类型(前端静态路由用角色类型进行路由权限的控制)
-   * - super: 超级管理员(该权限具有所有路由数据)
+   * 用户角色类型
    * - admin: 管理员
-   * - user: 用户
+   * - teacher: 教师
+   * - student: 学生
    */
-  type RoleType = 'super' | 'admin' | 'user';
+  type RoleType = 'admin' | 'teacher' | 'student';
 
   /** 用户信息 */
   interface UserInfo {

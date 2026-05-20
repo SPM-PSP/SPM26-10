@@ -1,5 +1,5 @@
-import { handleModuleRoutes } from '@/utils';
+import admin from './admin';
+import student from './student';
+import teacher from './teacher';
 
-const modules = import.meta.glob('./**/*.ts', { eager: true }) as AuthRoute.RouteModule;
-
-export const routes = handleModuleRoutes(modules);
+export const routes: AuthRoute.Route[] = [student, teacher, admin];

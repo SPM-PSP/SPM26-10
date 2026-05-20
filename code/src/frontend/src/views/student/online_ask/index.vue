@@ -1,21 +1,36 @@
 <!-- eslint-disable no-console, vue/no-v-html -->
 <template>
   <div class="h-full">
-    <n-card title="在线问答" :bordered="false" class="rounded-8px shadow-sm">
+    <n-card :title="pageTitle" :bordered="false" class="rounded-8px shadow-sm">
+      <n-space vertical class="mb-4">
+        <n-card :bordered="false" class="rounded-8px bg-#f8fafc dark:bg-#0f172a">
+          <n-space vertical :size="10">
+            <n-tag :type="roleTagType" round>{{ roleLabel }}</n-tag>
+            <div class="text-18px font-600">{{ pageHeadline }}</div>
+            <div class="text-14px text-gray-500">{{ pageDescription }}</div>
+            <n-space wrap>
+              <n-button v-for="item in suggestedQuestions" :key="item" size="small" secondary @click="fillQuestion(item)">
+                {{ item }}
+              </n-button>
+            </n-space>
+          </n-space>
+        </n-card>
+
+      </n-space>
       <n-space vertical class="mb-4">
         <n-card size="huge" title="智能回答">
           <div v-if="answerContent" class="markdown-body answer-content" v-html="answerHtml"></div>
           <div v-else-if="isLoading" class="text-gray-400">正在生成回答...</div>
-          <div v-else class="text-gray-400">提交问题后，答案将显示在这里...</div>
+          <div v-else class="text-gray-400">{{ emptyDescription }}</div>
         </n-card>
       </n-space>
 
-      <n-card title="提问区域" :bordered="false" class="rounded-8px shadow-sm">
+      <n-card :title="formTitle" :bordered="false" class="rounded-8px shadow-sm">
         <n-form ref="formRef" :model="questionData" :rules="question_form_rules" size="large">
           <n-form-item label="输入问题" path="question">
             <n-input
               v-model:value="questionData.question"
-              placeholder="请输入您的问题"
+              :placeholder="inputPlaceholder"
               type="textarea"
               :autosize="{ minRows: 3, maxRows: 5 }"
             />
@@ -42,6 +57,7 @@
 import { computed, reactive, ref } from 'vue';
 import type { FormInst } from 'naive-ui';
 import { marked } from 'marked';
+import { useAuthStore } from '@/store';
 import { formRules } from '@/utils';
 import type { OnlineQARequestPayload } from '@/types/qa';
 
@@ -73,6 +89,75 @@ const question_form_rules = {
 };
 
 const BASE_URL = import.meta.env.VITE_APP_BASE_URL || 'http://127.0.0.1:8000';
+const auth = useAuthStore();
+
+const roleTextMap: Record<Auth.RoleType, string> = {
+  student: '学生端',
+  teacher: '教师端',
+  admin: '管理端'
+};
+
+const roleTagMap: Record<Auth.RoleType, 'success' | 'info' | 'error'> = {
+  student: 'success',
+  teacher: 'info',
+  admin: 'error'
+};
+
+const contentMap: Record<
+  Auth.RoleType,
+  {
+    pageTitle: string;
+    headline: string;
+    description: string;
+    placeholder: string;
+    formTitle: string;
+    emptyDescription: string;
+    suggestions: string[];
+  }
+> = {
+  student: {
+    pageTitle: '在线问答',
+    headline: '围绕课程知识点提问，获得即时学习辅助。',
+    description: '适合用于课后复习、概念辨析和练习前查漏补缺。',
+    placeholder: '例如：什么是 Linux 内核模块？',
+    formTitle: '学习提问',
+    emptyDescription: '提交问题后，这里会显示基于知识库生成的回答。',
+    suggestions: ['什么是 Linux 内核模块？', '嵌入式 Linux 中设备驱动的作用是什么？', 'select 和 poll 有什么区别？']
+  },
+  teacher: {
+    pageTitle: '教学问答',
+    headline: '把它当作备课和课堂答疑的快速辅助入口。',
+    description: '适合快速确认知识点表述、组织课堂解释或准备教学示例。',
+    placeholder: '例如：请解释进程调度的核心概念',
+    formTitle: '教学提问',
+    emptyDescription: '提交问题后，这里会显示适合教学场景的辅助回答。',
+    suggestions: ['请解释进程调度的核心概念', '如何向学生讲清楚文件系统挂载？', '设备树在嵌入式 Linux 中的作用是什么？']
+  },
+  admin: {
+    pageTitle: '系统问答验证',
+    headline: '这里用于验证公共问答链路在管理端也能正常工作。',
+    description: '管理员不做内容创作，只保留联调和演示需要的问答入口。',
+    placeholder: '例如：请解释中断处理流程',
+    formTitle: '问答调试',
+    emptyDescription: '提交问题后，这里会显示公共问答链路返回的结果。',
+    suggestions: ['请解释中断处理流程', 'DMA 的基本作用是什么？', 'Linux 设备驱动通常包含哪些部分？']
+  }
+};
+
+const roleLabel = computed(() => roleTextMap[auth.userInfo.userRole]);
+const roleTagType = computed(() => roleTagMap[auth.userInfo.userRole]);
+const pageConfig = computed(() => contentMap[auth.userInfo.userRole]);
+const pageTitle = computed(() => pageConfig.value.pageTitle);
+const pageHeadline = computed(() => pageConfig.value.headline);
+const pageDescription = computed(() => pageConfig.value.description);
+const inputPlaceholder = computed(() => pageConfig.value.placeholder);
+const formTitle = computed(() => pageConfig.value.formTitle);
+const emptyDescription = computed(() => pageConfig.value.emptyDescription);
+const suggestedQuestions = computed(() => pageConfig.value.suggestions);
+
+function fillQuestion(question: string) {
+  questionData.question = question;
+}
 
 // 提交处理
 const handleSubmit = async (e: MouseEvent) => {

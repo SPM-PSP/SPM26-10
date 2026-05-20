@@ -11,6 +11,8 @@ export const views: Record<
   login: () => import('./_builtin/login/index.vue'),
   'not-found': () => import('./_builtin/not-found/index.vue'),
   about: () => import('./about/index.vue'),
+  admin_home: () => import('./admin/home/index.vue'),
+  admin_online_ask: () => import('./student/online_ask/index.vue'),
   admin_resource_management: () => import('./admin/resource_management/index.vue'),
   admin_user_management: () => import('./admin/user_management/index.vue'),
   'auth-demo_permission': () => import('./auth-demo/permission/index.vue'),
@@ -49,10 +51,13 @@ export const views: Record<
   plugin_swiper: () => import('./plugin/swiper/index.vue'),
   plugin_video: () => import('./plugin/video/index.vue'),
   resources: () => import('./resources/index.vue'),
+  student_home: () => import('./student/home/index.vue'),
   student_correct: () => import('./student/correct/index.vue'),
   student_online_ask: () => import('./student/online_ask/index.vue'),
   student_practice_question_generation: () => import('./student/practice_question_generation/index.vue'),
+  teacher_home: () => import('./teacher/home/index.vue'),
   teacher_assesment: () => import('./teacher/assesment/index.vue'),
   teacher_correct: () => import('./teacher/correct/index.vue'),
-  'teacher_lesson-plan': () => import('./teacher/lesson-plan/index.vue')
+  'teacher_lesson-plan': () => import('./teacher/lesson-plan/index.vue'),
+  teacher_online_ask: () => import('./student/online_ask/index.vue')
 };

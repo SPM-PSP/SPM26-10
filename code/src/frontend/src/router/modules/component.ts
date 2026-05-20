@@ -10,7 +10,7 @@ const component: AuthRoute.Route = {
     singleLayout: 'basic',
     icon: 'cib:app-store',
     order: 3,
-    permissions: ['admin', 'super']
+    permissions: ['teacher', 'admin']
   }
 };
 

@@ -33,22 +33,22 @@ interface Account {
 
 const accounts: Account[] = [
   {
-    key: 'super',
-    label: userRoleLabels.super,
-    userName: 'Super',
-    password: 'super123'
-  },
-  {
     key: 'admin',
     label: userRoleLabels.admin,
-    userName: 'Admin',
-    password: 'admin123'
+    userName: 'admin',
+    password: '123456'
   },
   {
-    key: 'user',
-    label: userRoleLabels.user,
-    userName: 'User01',
-    password: 'user01123'
+    key: 'teacher',
+    label: userRoleLabels.teacher,
+    userName: 'teacher',
+    password: '123456'
+  },
+  {
+    key: 'student',
+    label: userRoleLabels.student,
+    userName: 'student',
+    password: '123456'
   }
 ];
 

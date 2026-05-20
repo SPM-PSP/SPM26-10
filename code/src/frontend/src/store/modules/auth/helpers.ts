@@ -2,7 +2,7 @@ import { localStg } from '@/utils';
 
 /** 获取token */
 export function getToken() {
-  return localStg.get('token') || '';
+  return sessionStorage.getItem('session_id') || localStg.get('token') || '';
 }
 
 /** 获取用户信息 */
@@ -10,7 +10,7 @@ export function getUserInfo() {
   const emptyInfo: Auth.UserInfo = {
     userId: '',
     userName: '',
-    userRole: 'user'
+    userRole: 'student'
   };
   const userInfo: Auth.UserInfo = localStg.get('userInfo') || emptyInfo;
 

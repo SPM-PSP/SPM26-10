@@ -10,7 +10,7 @@ const plugin: AuthRoute.Route = {
     singleLayout: 'basic',
     icon: 'clarity:plugin-line',
     order: 4,
-    permissions: ['super', 'admin']
+    permissions: ['teacher', 'admin']
   }
 };
 

@@ -6,7 +6,7 @@ export default function setupPermissionDirective(app: App) {
 
   function updateElVisible(el: HTMLElement, permission: Auth.RoleType | Auth.RoleType[]) {
     if (!permission) {
-      throw new Error(`need roles: like v-permission="'admin'", v-permission="['admin', 'test]"`);
+      throw new Error(`need roles: like v-permission="'admin'", v-permission="['admin', 'teacher']"`);
     }
     if (!hasPermission(permission)) {
       el.parentElement?.removeChild(el);

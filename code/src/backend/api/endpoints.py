@@ -913,22 +913,15 @@ async def get_all_users_api(current_user: User = Depends(get_current_user_simple
 @router.get("/admin/resources", response_model=List[ResourceMetadata], summary="获取所有课件资源列表")
 async def get_all_resources_api(current_user: User = Depends(get_current_user_simple),db: AsyncSession = Depends(get_db),subject: Optional[str] = Query(None, description="按学科筛选资源。") # 新增查询参数
 ):
-    # 任何已认证用户都可以查看所有资源列表 (可以根据角色进一步细化权限)
-    if current_user.role != "admin" and current_user.role != "teacher" and current_user.role != "student":
+    if current_user.role not in ["admin", "teacher", "student"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权限查看资源列表。")
 
     query = select(Resource)
     if subject:
         query = query.where(Resource.subject == subject) # 根据学科过滤
 
-    # 如果用户是学生，可能只显示与他相关的资源
     if current_user.role == "student":
-        # 示例：只显示学生创建的资源（如果资源是教师创建的，学生则看不到）
-        # 实际应用中，您可能需要更复杂的逻辑，例如：
-        # - 显示所有“公开”资源
-        # - 显示学生所在课程的资源
-        # - 显示与学生交互过的资源等
-        query = query.where(Resource.created_by_user_id == current_user.id) # 仅作示例，实际可能需调整
+        query = query.where(Resource.created_by_user_id == current_user.id)
 
     result = await db.execute(query)
     resources = result.scalars().all()
@@ -978,6 +971,8 @@ async def get_resources_content_for_export(
 @router.get("/admin/dashboard/metrics", response_model=DashboardMetrics, summary="获取系统大屏概览数据")
 async def get_dashboard_metrics_api(current_user: User = Depends(get_current_user_simple),db: AsyncSession = Depends(get_db)
 ):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可查看系统概览数据。")
 
     # --- 获取当前时间，用于计算当日/本周活跃度 ---
     now = datetime.now(timezone.utc)

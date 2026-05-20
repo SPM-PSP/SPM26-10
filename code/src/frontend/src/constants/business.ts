@@ -10,9 +10,9 @@ export const loginModuleLabels: Record<UnionKey.LoginModule, string> = {
 };
 
 export const userRoleLabels: Record<Auth.RoleType, string> = {
-  super: $t('page.login.pwdLogin.superAdmin'),
-  admin: $t('page.login.pwdLogin.admin'),
-  user: $t('page.login.pwdLogin.user')
+  admin: '管理员',
+  teacher: '教师',
+  student: '学生'
 };
 export const userRoleOptions = transformObjectToOption(userRoleLabels);
 

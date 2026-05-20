@@ -16,14 +16,12 @@ export function usePermission() {
   function hasPermission(permission: Auth.RoleType | Auth.RoleType[]) {
     const { userRole } = auth.userInfo;
 
-    let has = userRole === 'super';
-    if (!has) {
-      if (isArray(permission)) {
-        has = (permission as Auth.RoleType[]).includes(userRole);
-      }
-      if (isString(permission)) {
-        has = (permission as Auth.RoleType) === userRole;
-      }
+    let has = false;
+    if (isArray(permission)) {
+      has = (permission as Auth.RoleType[]).includes(userRole);
+    }
+    if (isString(permission)) {
+      has = (permission as Auth.RoleType) === userRole;
     }
     return has;
   }

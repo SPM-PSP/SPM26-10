@@ -10,7 +10,7 @@ const exception: AuthRoute.Route = {
     singleLayout: 'basic',
     icon: 'ant-design:exception-outlined',
     order: 7,
-    permissions: ['user', 'super', 'admin']
+    permissions: ['student', 'admin']
   }
 };
 

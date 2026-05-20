@@ -12,7 +12,7 @@ const dashboard: AuthRoute.Route = {
         requiresAuth: true,
         icon: 'icon-park-outline:analysis',
         i18nTitle: 'routes.dashboard.analysis',
-        permissions: ['user', 'admin', 'super']
+        permissions: ['admin']
       }
     },
     {

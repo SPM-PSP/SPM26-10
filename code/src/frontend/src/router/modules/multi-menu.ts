@@ -10,7 +10,7 @@ const multiMenu: AuthRoute.Route = {
     singleLayout: 'basic',
     icon: 'carbon:menu',
     order: 8,
-    permissions: ['user', 'admin']
+    permissions: ['student', 'admin']
   }
 };
 

@@ -10,7 +10,7 @@ const functionRoute: AuthRoute.Route = {
     singleLayout: 'basic',
     icon: 'icon-park-outline:all-application',
     order: 6,
-    permissions: ['user', 'admin']
+    permissions: ['student', 'teacher', 'admin']
   }
 };
 

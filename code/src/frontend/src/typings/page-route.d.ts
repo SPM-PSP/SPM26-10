@@ -24,6 +24,8 @@ declare namespace PageRoute {
     | 'not-found'
     | 'about'
     | 'admin'
+    | 'admin_home'
+    | 'admin_online_ask'
     | 'admin_resource'
     | 'admin_resource_management'
     | 'admin_user'
@@ -78,6 +80,7 @@ declare namespace PageRoute {
     | 'plugin_video'
     | 'resources'
     | 'student'
+    | 'student_home'
     | 'student_correct'
     | 'student_online'
     | 'student_online_ask'
@@ -85,9 +88,11 @@ declare namespace PageRoute {
     | 'student_practice_question'
     | 'student_practice_question_generation'
     | 'teacher'
+    | 'teacher_home'
     | 'teacher_assesment'
     | 'teacher_correct'
-    | 'teacher_lesson-plan';
+    | 'teacher_lesson-plan'
+    | 'teacher_online_ask';
 
   /**
    * last degree route key, which has the page file
@@ -102,6 +107,8 @@ declare namespace PageRoute {
     | 'login'
     | 'not-found'
     | 'about'
+    | 'admin_home'
+    | 'admin_online_ask'
     | 'admin_resource_management'
     | 'admin_user_management'
     | 'auth-demo_permission'
@@ -140,11 +147,14 @@ declare namespace PageRoute {
     | 'plugin_swiper'
     | 'plugin_video'
     | 'resources'
+    | 'student_home'
     | 'student_correct'
     | 'student_online_ask'
     | 'student_practice_question_generation'
+    | 'teacher_home'
     | 'teacher_assesment'
     | 'teacher_correct'
     | 'teacher_lesson-plan'
+    | 'teacher_online_ask'
   >;
 }

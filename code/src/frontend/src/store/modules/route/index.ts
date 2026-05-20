@@ -37,6 +37,16 @@ interface RouteState {
   cacheRoutes: string[];
 }
 
+function getRoleHomeName(userRole: Auth.RoleType): AuthRoute.AllRouteKey {
+  const homeMap: Record<Auth.RoleType, AuthRoute.AllRouteKey> = {
+    student: 'student_home',
+    teacher: 'teacher_home',
+    admin: 'admin_home'
+  };
+
+  return homeMap[userRole] || 'student_home';
+}
+
 export const useRouteStore = defineStore('route-store', {
   state: (): RouteState => ({
     authRouteMode: import.meta.env.VITE_AUTH_ROUTE_MODE,
@@ -137,8 +147,10 @@ export const useRouteStore = defineStore('route-store', {
       const { initHomeTab } = useTabStore();
       const auth = useAuthStore();
 
+      this.routeHomeName = getRoleHomeName(auth.userInfo.userRole);
       const routes = filterAuthRoutesByUserPermission(staticRoutes, auth.userInfo.userRole);
       this.handleAuthRoute(routes);
+      this.handleUpdateRootRedirect(this.routeHomeName);
 
       initHomeTab(this.routeHomeName, router);
 
