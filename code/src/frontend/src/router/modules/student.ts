@@ -15,6 +15,17 @@ const student: AuthRoute.Route = {
       }
     },
     {
+      name: 'student_classes',
+      path: '/student/classes',
+      component: 'self',
+      meta: {
+        title: '我的班级',
+        requiresAuth: true,
+        icon: 'mdi:account-group-outline',
+        permissions: ['student', 'admin']
+      }
+    },
+    {
       name: 'student_online_ask',
       path: '/student/online/ask',
       component: 'self',
@@ -22,6 +33,17 @@ const student: AuthRoute.Route = {
         title: '在线问答',
         requiresAuth: true,
         icon: 'mdi:chat-processing-outline',
+        permissions: ['student', 'admin']
+      }
+    },
+    {
+      name: 'student_papers',
+      path: '/student/papers',
+      component: 'self',
+      meta: {
+        title: '班级试卷',
+        requiresAuth: true,
+        icon: 'mdi:file-check-outline',
         permissions: ['student', 'admin']
       }
     },

@@ -40,6 +40,11 @@ const theme = useThemeStore();
 
 const actions = [
   {
+    title: '班级管理',
+    description: '创建班级、查看班级码，并追踪学生加入情况。',
+    routeName: 'teacher_classes'
+  },
+  {
     title: '在线问答',
     description: '快速查询课程知识点，作为备课和答疑的辅助入口。',
     routeName: 'teacher_online_ask'
@@ -55,9 +60,19 @@ const actions = [
     routeName: 'teacher_assesment'
   },
   {
+    title: '试卷生成与发布',
+    description: '从教学计划生成试卷草稿，编辑后直接发布到班级。',
+    routeName: 'teacher_papers'
+  },
+  {
     title: '作业批改',
     description: '录入题目、学生答案与参考答案，获取自动反馈。',
     routeName: 'teacher_correct'
+  },
+  {
+    title: '试卷结果分析',
+    description: '查看学生交卷情况、逐题反馈和整体正确率。',
+    routeName: 'teacher_paper_results'
   }
 ];
 

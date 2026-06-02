@@ -84,7 +84,7 @@ export const useAuthStore = defineStore('auth-store', {
         const response = await _axios.post('/api/login', {
           username: userName,
           password
-        });
+        }, { skipGlobalErrorHandler: true } as any);
 
         if (response.data.status !== 'success' || !response.data.session_id) {
           throw new Error(response.data.message || '登录失败');
@@ -106,7 +106,8 @@ export const useAuthStore = defineStore('auth-store', {
           duration: 3000
         });
       } catch (error) {
-        this.resetAuthStore();
+        clearAuthStorage();
+        this.$reset();
         throw error;
       } finally {
         this.loginLoading = false;

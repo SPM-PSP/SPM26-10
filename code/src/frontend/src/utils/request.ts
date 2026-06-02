@@ -50,7 +50,11 @@ _axios.interceptors.response.use(
 
     if (error.response) {
       const { status, data } = error.response;
-      if (data && data.message) {
+      if (data?.detail?.message) {
+        errorMessage = data.detail.message;
+      } else if (typeof data?.detail === 'string') {
+        errorMessage = data.detail;
+      } else if (data && data.message) {
         errorMessage = data.message;
       } else {
         switch (status) {
@@ -83,7 +87,10 @@ _axios.interceptors.response.use(
       errorMessage = '请求配置错误。';
     }
 
-    message.error(errorMessage); // 使用 Naive UI 提示错误
+    if (!error.config?.skipGlobalErrorHandler) {
+      message.error(errorMessage); // 使用 Naive UI 提示错误
+    }
+
     return Promise.reject(error);
   }
 );

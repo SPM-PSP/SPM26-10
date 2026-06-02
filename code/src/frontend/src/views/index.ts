@@ -51,13 +51,18 @@ export const views: Record<
   plugin_swiper: () => import('./plugin/swiper/index.vue'),
   plugin_video: () => import('./plugin/video/index.vue'),
   resources: () => import('./resources/index.vue'),
+  student_classes: () => import('./student/classes/index.vue'),
   student_home: () => import('./student/home/index.vue'),
   student_correct: () => import('./student/correct/index.vue'),
   student_online_ask: () => import('./student/online_ask/index.vue'),
+  student_papers: () => import('./student/papers/index.vue'),
   student_practice_question_generation: () => import('./student/practice_question_generation/index.vue'),
+  teacher_classes: () => import('./teacher/classes/index.vue'),
   teacher_home: () => import('./teacher/home/index.vue'),
   teacher_assesment: () => import('./teacher/assesment/index.vue'),
   teacher_correct: () => import('./teacher/correct/index.vue'),
   'teacher_lesson-plan': () => import('./teacher/lesson-plan/index.vue'),
+  teacher_paper_results: () => import('./teacher/paper-results/index.vue'),
+  teacher_papers: () => import('./teacher/papers/index.vue'),
   teacher_online_ask: () => import('./student/online_ask/index.vue')
 };

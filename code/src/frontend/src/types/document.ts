@@ -43,4 +43,6 @@ export interface CoursePlanApiResponse {
   lesson_plan: string; // 这里的 lesson_plan 字段是直接包含 Markdown 格式的字符串
   /** 计划生成的时间，ISO 8601格式 */
   generated_at: string;
+  /** 生成后的资源ID，供后续加载详情与管理 */
+  resource_id?: string;
 }

@@ -2,7 +2,11 @@
 <template>
   <n-form ref="formRef" :model="model" :rules="rules" size="large" :show-label="false">
     <n-form-item path="userName">
-      <n-input v-model:value="model.userName" :placeholder="$t('page.login.common.userNamePlaceholder')" />
+      <n-input
+        v-model:value="model.userName"
+        :placeholder="$t('page.login.common.userNamePlaceholder')"
+        @update:value="clearLoginError"
+      />
     </n-form-item>
     <n-form-item path="password">
       <n-input
@@ -10,8 +14,13 @@
         type="password"
         show-password-on="click"
         :placeholder="$t('page.login.common.passwordPlaceholder')"
+        @update:value="clearLoginError"
       />
     </n-form-item>
+
+    <n-alert v-if="loginError" type="error" :show-icon="true" class="mb-18px rounded-10px">
+      {{ loginError }}
+    </n-alert>
 
     <n-space :vertical="true" :size="18">
       <div class="flex-y-center justify-between">
@@ -48,7 +57,7 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { useMessage, type FormInst, type FormRules, type FormItemRule } from 'naive-ui';
+import { type FormInst, type FormRules, type FormItemRule } from 'naive-ui';
 import { useAuthStore } from '@/store';
 
 const loginModuleLabels = {
@@ -56,7 +65,6 @@ const loginModuleLabels = {
   register: '注册'
 };
 
-const message = useMessage();
 const auth = useAuthStore();
 const router = useRouter();
 
@@ -69,6 +77,7 @@ const model = reactive({
 
 const loginLoading = ref(false);
 const rememberMe = ref(false);
+const loginError = ref('');
 
 const rules: FormRules = {
   userName: {
@@ -92,17 +101,49 @@ const rules: FormRules = {
 
 async function handleSubmit() {
   try {
+    loginError.value = '';
     await formRef.value?.validate();
     loginLoading.value = true;
     await auth.login(model.userName, model.password);
-    message.success('登录成功！');
   } catch (error: any) {
     console.error('登录请求或表单验证失败:', error);
-    const detailMessage =
-      error?.response?.data?.detail?.message || error?.response?.data?.message || error?.message || '登录失败，请重试。';
-    message.error(detailMessage);
+    loginError.value = getLoginErrorMessage(error);
   } finally {
     loginLoading.value = false;
+  }
+}
+
+function getLoginErrorMessage(error: any) {
+  const detail = error?.response?.data?.detail;
+  const directMessage = detail?.message || error?.response?.data?.message;
+
+  if (directMessage) {
+    return directMessage;
+  }
+
+  if (typeof detail === 'string') {
+    const quotedMessage = detail.match(/['"]message['"]:\s*['"]([^'"]+)['"]/);
+    if (quotedMessage?.[1]) {
+      return quotedMessage[1];
+    }
+
+    if (detail.includes('用户名或密码不正确')) {
+      return '用户名或密码不正确';
+    }
+
+    return detail;
+  }
+
+  if (error?.message?.includes('用户名或密码不正确')) {
+    return '用户名或密码不正确';
+  }
+
+  return '用户名或密码错误，请检查后重试。';
+}
+
+function clearLoginError() {
+  if (loginError.value) {
+    loginError.value = '';
   }
 }
 

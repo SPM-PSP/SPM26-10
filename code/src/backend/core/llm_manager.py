@@ -57,7 +57,7 @@ def validate_llm_settings():
             raise RuntimeError("当前启用了远程 LLM，但未配置 LLM_API_MODEL。")
 
 
-def _resolve_max_new_tokens(max_new_tokens: int | None, default: int = 512) -> int:
+def _resolve_max_new_tokens(max_new_tokens: int | None, default: int = 8192) -> int:
     return max_new_tokens if max_new_tokens is not None else default
 
 
@@ -432,7 +432,7 @@ def generate_text_with_qwen3(
     user_question: str,
     retrieved_documents_content: list[str],
     final_instruction: str,
-    max_new_tokens: int | None = 512,
+    max_new_tokens: int | None = None,
     temperature: float = 0.7,
     top_p: float = 0.8,
     presence_penalty: float = 1.5,
@@ -472,7 +472,7 @@ def stream_text_with_qwen3(
     user_question: str,
     retrieved_documents_content: list[str],
     final_instruction: str,
-    max_new_tokens: int | None = 512,
+    max_new_tokens: int | None = None,
     temperature: float = 0.7,
     top_p: float = 0.8,
     enable_thinking_mode: bool = True

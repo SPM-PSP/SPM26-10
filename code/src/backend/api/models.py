@@ -37,6 +37,7 @@ class LessonPlanResponse(BaseModel):
     status: str = Field(..., description="操作状态。")
     lesson_plan: str = Field(..., description="生成的详细教学内容。")
     generated_at: datetime.datetime = Field(..., description="生成时间。")
+    resource_id: Optional[str] = None
 
 #教师生成考核题目的参数（题型、难度、数量等）
 class AssessmentQuestionRequest(BaseModel):
@@ -52,7 +53,8 @@ class AssessmentQuestionResponse(BaseModel):
     status: str = Field(..., description="操作状态。")
     assessment_content: str = Field(..., description="生成的考核题目及参考答案。")
     generated_at: datetime.datetime = Field(..., description="生成时间。")
-    resource_id: uuid.UUID
+    resource_id: str
+    questions: List["GeneratedQuestionResponse"] = Field(default_factory=list)
 
 #提交学生答案和参考示例，请求批改
 class StudentAnswerCorrectionRequest(BaseModel):
@@ -96,7 +98,8 @@ class PracticeQuestionResponse(BaseModel):
     status: str = Field(..., description="操作状态。")
     practice_questions: str = Field(..., description="生成的练习题目和答案。")
     generated_at: datetime.datetime = Field(..., description="生成时间。")
-    resource_id: uuid.UUID
+    resource_id: str
+    questions: List["GeneratedQuestionResponse"] = Field(default_factory=list)
 
 # 管理侧模型-----------------
 
@@ -194,3 +197,289 @@ class CourseResponse(BaseModel):
     description: Optional[str] = None
     created_at: datetime.datetime
     model_config = ConfigDict(from_attributes=True) # 启用 Pydantic 从 ORM 模型直接读取
+
+
+# 班级与试卷-------------------
+
+class ClassCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=2000)
+
+
+class ClassJoinRequest(BaseModel):
+    class_code: str = Field(..., min_length=4, max_length=32)
+
+
+class ClassMemberResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    student_id: int
+    student_name: str
+    joined_at: datetime.datetime
+    status: str
+
+
+class ClassResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    description: Optional[str] = None
+    class_code: str
+    teacher_id: int
+    teacher_name: Optional[str] = None
+    status: str = "active"
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    member_count: int = 0
+
+
+class ClassDetailResponse(ClassResponse):
+    members: List[ClassMemberResponse] = Field(default_factory=list)
+
+
+class PaperQuestionInput(BaseModel):
+    id: Optional[str] = None
+    question_type: str
+    question_content: str
+    reference_answer: Optional[str] = None
+    score: float = 10.0
+    difficulty_level: Optional[str] = None
+    sort_order: int = 1
+    metadata_json: Optional[Dict[str, Any]] = None
+
+
+class PaperSectionInput(BaseModel):
+    id: Optional[str] = None
+    section_title: str
+    source_module_name: Optional[str] = None
+    sort_order: int = 1
+    questions: List[PaperQuestionInput] = Field(default_factory=list)
+
+
+class PaperFromLessonPlanRequest(BaseModel):
+    source_resource_id: str
+    title: Optional[str] = None
+    question_type: str = Field("混合")
+    difficulty_level: str = Field("中等")
+    questions_per_section: int = Field(2, ge=1, le=10)
+    max_sections: int = Field(4, ge=1, le=12)
+
+
+class PaperUpdateRequest(BaseModel):
+    title: str
+    status: Optional[str] = None
+    sections: List[PaperSectionInput] = Field(default_factory=list)
+
+
+class PaperPublicationRequest(BaseModel):
+    class_id: str
+    deadline: Optional[datetime.datetime] = None
+
+
+class PaperQuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    question_type: str
+    question_content: str
+    reference_answer: Optional[str] = None
+    score: float
+    difficulty_level: Optional[str] = None
+    sort_order: int
+    metadata_json: Optional[Dict[str, Any]] = None
+
+
+class PaperSectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    section_title: str
+    source_module_name: Optional[str] = None
+    sort_order: int
+    questions: List[PaperQuestionResponse] = Field(default_factory=list)
+
+
+class PaperResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    title: str
+    source_resource_id: Optional[str] = None
+    created_by_teacher_id: int
+    class_id: Optional[str] = None
+    status: str
+    total_score: float
+    metadata_json: Optional[Dict[str, Any]] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    sections: List[PaperSectionResponse] = Field(default_factory=list)
+    publication_count: int = 0
+
+
+class PaperPublicationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    paper_id: str
+    class_id: str
+    class_name: Optional[str] = None
+    published_by: int
+    published_at: datetime.datetime
+    deadline: Optional[datetime.datetime] = None
+    status: str
+
+
+class StudentPaperListItem(BaseModel):
+    id: str
+    publication_id: str
+    title: str
+    class_name: str
+    teacher_name: str
+    published_at: datetime.datetime
+    deadline: Optional[datetime.datetime] = None
+    status: str
+    total_score: float
+
+
+class StudentPaperDetailResponse(BaseModel):
+    publication_id: str
+    paper: PaperResponse
+    class_name: str
+    teacher_name: str
+    published_at: datetime.datetime
+    deadline: Optional[datetime.datetime] = None
+
+
+class PaperSubmissionAnswerInput(BaseModel):
+    question_id: str
+    student_answer: str
+
+
+class PaperSubmissionRequest(BaseModel):
+    answers: List[PaperSubmissionAnswerInput] = Field(..., min_length=1)
+
+
+class PaperSubmissionAnswerResponse(BaseModel):
+    id: str
+    question_id: str
+    question_content: str
+    question_type: str
+    reference_answer: Optional[str] = None
+    student_answer: str
+    auto_feedback: Optional[str] = None
+    score: float
+    max_score: float
+    is_correct: Optional[bool] = None
+    error_tags_json: Optional[Dict[str, Any]] = None
+    corrected_at: Optional[datetime.datetime] = None
+
+
+class PaperSubmissionResponse(BaseModel):
+    id: str
+    paper_id: str
+    publication_id: str
+    student_id: int
+    student_name: Optional[str] = None
+    submitted_at: datetime.datetime
+    status: str
+    total_score: float
+    max_score: float
+    correctness_percentage: Optional[float] = None
+    error_analysis_json: Optional[Dict[str, Any]] = None
+    answers: List[PaperSubmissionAnswerResponse] = Field(default_factory=list)
+
+
+class TeacherPaperSubmissionSummary(BaseModel):
+    id: str
+    student_id: int
+    student_name: str
+    submitted_at: datetime.datetime
+    total_score: float
+    max_score: float
+    correctness_percentage: Optional[float] = None
+    status: str
+
+
+class GeneratedQuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    resource_id: str
+    question_type: Literal["选择题", "填空题", "简答题", "编程题"]
+    question_content: str
+    options: List[str] = Field(default_factory=list)
+    reference_answer: Optional[str] = None
+    score: float
+    difficulty_level: Optional[str] = None
+    sort_order: int
+    metadata_json: Optional[Dict[str, Any]] = None
+
+
+class GeneratedQuestionSetResponse(BaseModel):
+    id: str
+    title: str
+    resource_type: Literal["assessment", "practice"]
+    created_by_user_id: int
+    created_at: datetime.datetime
+    subject: Optional[str] = None
+    metadata_json: Optional[Dict[str, Any]] = None
+    content: Optional[str] = None
+    questions: List[GeneratedQuestionResponse] = Field(default_factory=list)
+
+
+class LessonPlanDetailResponse(BaseModel):
+    id: str
+    title: str
+    created_by_user_id: int
+    created_at: datetime.datetime
+    metadata_json: Optional[Dict[str, Any]] = None
+    subject: Optional[str] = None
+    content: str
+
+
+class LessonPlanUpdateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    content: str = Field(..., min_length=1)
+
+
+class LessonPlanReviseRequest(BaseModel):
+    revision_instruction: str = Field(..., min_length=1)
+    save_as_new: bool = False
+    title: Optional[str] = Field(None, max_length=500)
+
+
+class AppendGeneratedQuestionsRequest(BaseModel):
+    resource_id: str
+    section_title: Optional[str] = None
+
+
+class PracticeSubmissionAnswerInput(BaseModel):
+    question_id: str
+    student_answer: str
+
+
+class PracticeSubmissionRequest(BaseModel):
+    answers: List[PracticeSubmissionAnswerInput] = Field(..., min_length=1)
+
+
+class PracticeSubmissionAnswerResponse(BaseModel):
+    question_id: str
+    question_content: str
+    question_type: str
+    reference_answer: Optional[str] = None
+    student_answer: str
+    auto_feedback: Optional[str] = None
+    score: float
+    max_score: float
+    is_correct: Optional[bool] = None
+    error_tags_json: Optional[Dict[str, Any]] = None
+
+
+class PracticeSubmissionResponse(BaseModel):
+    resource_id: str
+    total_score: float
+    max_score: float
+    correctness_percentage: Optional[float] = None
+    answers: List[PracticeSubmissionAnswerResponse] = Field(default_factory=list)

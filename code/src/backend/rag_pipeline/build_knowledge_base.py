@@ -17,6 +17,9 @@ DOCS_DIR = os.path.join(PROJECT_ROOT, "data", "docs")  # 原始教学文档存�
 CHROMA_PERSIST_DIR = os.path.join(PROJECT_ROOT, "data", "chroma_db")  # 向量数据库存放
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5" # 用于生成文本嵌入的预训练模型名称
 SUPPORTED_TEXT_SUFFIXES = (".txt", ".md")
+LOCAL_EMBEDDING_SNAPSHOT = os.path.expanduser(
+    "~/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620"
+)
 
 DEVICE = "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") is not None or \
                     (hasattr(os, 'is_available') and torch.cuda.is_available()) else "cpu"
@@ -70,11 +73,12 @@ def split_documents(documents:list)->list:
 
 #初始化并返回用于生成嵌入的HuggingFaceEmbeddings模型
 def get_embeddings_model(model_name: str, device: str):
-    print(f"加载嵌入模型: {model_name}，设备: {device}...")
+    model_path = LOCAL_EMBEDDING_SNAPSHOT if os.path.exists(LOCAL_EMBEDDING_SNAPSHOT) else model_name
+    print(f"加载嵌入模型: {model_path}，设备: {device}...")
     # HuggingFaceEmbeddings 封装了 sentence-transformers 库
     embeddings = HuggingFaceEmbeddings(
-        model_name=model_name,
-        model_kwargs={'device': device} # 指定模型运行在 CPU 还是 GPU
+        model_name=model_path,
+        model_kwargs={'device': device} # 指定模型运行在 CPU 还是 GPU；若存在本地快照则直接加载快照路径
     )
     print("嵌入模型加载成功。")
     return embeddings

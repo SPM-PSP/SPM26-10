@@ -1,152 +1,244 @@
 <!-- eslint-disable vue/no-v-html -->
 <template>
   <div class="h-full">
-    <n-card title="考核题目生成" :bordered="false" class="rounded-8px shadow-sm">
-      <div class="pb-12px text-16px">设置考察内容、题目类型与难度，智能生成考核题目</div>
-      <n-card title="课程信息" :bordered="false" class="mt-10px rounded-8px shadow-sm">
-        <n-form ref="formRef" :model="assesment" :rules="assessment_rules" size="large" :show-label="true">
+    <n-space vertical :size="20">
+      <n-card title="考核题目生成" :bordered="false" class="rounded-8px shadow-sm">
+        <div class="pb-12px text-16px">设置考察内容、题型与难度，系统会生成结构化题目并保存到你的题库。</div>
+        <n-form ref="formRef" :model="assessment" :rules="assessmentRules" size="large" :show-label="true">
           <n-form-item label="考察内容" path="topic">
-            <n-input v-model:value="assesment.topic" placeholder="请输入考察内容" />
+            <n-input v-model:value="assessment.topic" placeholder="请输入考察内容" />
           </n-form-item>
-          <n-form-item label="题型" path="question_type">
-            <n-select v-model:value="assesment.question_type" :options="question_type_options" />
-          </n-form-item>
-          <n-form-item label="难度" path="difficulty_level">
-            <n-select v-model:value="assesment.difficulty_level" :options="difficulty_level_options" />
-          </n-form-item>
-          <n-form-item label="题目数量" path="num_questions">
-            <n-select v-model:value="assesment.num_questions" :options="num_questions_options" filterable />
-          </n-form-item>
-          <n-space :vertical="true" :size="18">
-            <n-button
-              type="primary"
-              size="large"
-              :block="true"
-              :round="true"
-              :loading="isLoading"
-              @click="handleSubmit"
-            >
-              {{ isLoading ? '提交中...' : '提交' }}
-            </n-button>
-          </n-space>
+          <n-grid cols="1 l:3" responsive="screen" :x-gap="16">
+            <n-grid-item>
+              <n-form-item label="题型" path="question_type">
+                <n-select v-model:value="assessment.question_type" :options="questionTypeOptions" />
+              </n-form-item>
+            </n-grid-item>
+            <n-grid-item>
+              <n-form-item label="难度" path="difficulty_level">
+                <n-select v-model:value="assessment.difficulty_level" :options="difficultyLevelOptions" />
+              </n-form-item>
+            </n-grid-item>
+            <n-grid-item>
+              <n-form-item label="题目数量" path="num_questions">
+                <n-select v-model:value="assessment.num_questions" :options="numQuestionsOptions" />
+              </n-form-item>
+            </n-grid-item>
+          </n-grid>
+          <n-button type="primary" size="large" :loading="isLoading" @click="handleSubmit">
+            {{ isLoading ? '生成中...' : '生成考核题目' }}
+          </n-button>
         </n-form>
       </n-card>
 
-      <n-space vertical class="mt-20px">
-        <n-card title="考核题目" size="huge" :bordered="false" class="rounded-8px shadow-sm">
-          <template v-if="assessmentContent">
-            <div class="markdown-body" v-html="assessmentHtml"></div>
-          </template>
-          <template v-else>
-            <n-empty description="提交课程信息后将在此处显示考核题目" />
-          </template>
-        </n-card>
-      </n-space>
-    </n-card>
+      <n-grid cols="1 l:2" responsive="screen" :x-gap="16" :y-gap="16">
+        <n-grid-item>
+          <n-card title="已生成考核题" :bordered="false" class="rounded-8px shadow-sm">
+            <n-space justify="space-between" align="center">
+              <div class="text-14px text-#64748b">你生成的考核题会保存在这里，可重复查看或删除。</div>
+              <n-button @click="fetchGeneratedAssessments">刷新</n-button>
+            </n-space>
+
+            <n-space vertical :size="12" class="mt-16px">
+              <template v-if="generatedAssessments.length">
+                <n-card
+                  v-for="item in generatedAssessments"
+                  :key="item.id"
+                  :bordered="false"
+                  :class="['rounded-8px assessment-card', selectedAssessment?.id === item.id ? 'assessment-card--active' : '']"
+                  hoverable
+                  @click="selectAssessment(item.id)"
+                >
+                  <n-space vertical :size="8">
+                    <div class="text-17px font-600">{{ item.title }}</div>
+                    <div class="text-13px text-#64748b">创建时间：{{ formatDate(item.created_at) }}</div>
+                    <div class="text-13px text-#64748b">
+                      题目数：{{ item.questions.length }} ｜ 题型：{{ item.metadata_json?.question_type || '未标注' }}
+                    </div>
+                    <n-space :size="10">
+                      <n-button size="small" @click.stop="selectAssessment(item.id)">查看</n-button>
+                      <n-popconfirm @positive-click="deleteAssessment(item.id)">
+                        <template #trigger>
+                          <n-button size="small" type="error" ghost @click.stop>删除</n-button>
+                        </template>
+                        删除后将无法再追加到试卷草稿中，确认继续？
+                      </n-popconfirm>
+                    </n-space>
+                  </n-space>
+                </n-card>
+              </template>
+              <template v-else>
+                <n-empty description="还没有生成考核题。" />
+              </template>
+            </n-space>
+          </n-card>
+        </n-grid-item>
+
+        <n-grid-item>
+          <n-card title="考核题详情" :bordered="false" class="rounded-8px shadow-sm">
+            <template v-if="selectedAssessment">
+              <n-space vertical :size="16">
+                <div class="text-22px font-700">{{ selectedAssessment.title }}</div>
+                <div class="text-13px text-#64748b">
+                  创建时间：{{ formatDate(selectedAssessment.created_at) }} ｜ 题目数：{{ selectedAssessment.questions.length }}
+                </div>
+
+                <n-card v-for="question in selectedAssessment.questions" :key="question.id" :bordered="false" class="rounded-8px bg-#f8fafc">
+                  <n-space vertical :size="10">
+                    <div class="text-15px font-600">
+                      {{ question.sort_order }}. {{ question.question_content }}
+                    </div>
+                    <div class="text-12px text-#64748b">
+                      题型：{{ question.question_type }} ｜ 难度：{{ question.difficulty_level || '未标注' }} ｜ 分值：{{ question.score }}
+                    </div>
+                    <div v-if="question.question_type === '选择题' && question.options.length" class="text-14px text-#475569">
+                      <div v-for="(option, index) in question.options" :key="`${question.id}-${index}`">
+                        {{ String.fromCharCode(65 + index) }}. {{ option }}
+                      </div>
+                    </div>
+                    <div class="text-14px text-#0f766e">参考答案：{{ question.reference_answer || '无' }}</div>
+                  </n-space>
+                </n-card>
+
+                <n-card title="Markdown 预览" :bordered="false" class="rounded-8px bg-#f8fafc">
+                  <div class="markdown-body" v-html="assessmentHtml"></div>
+                </n-card>
+              </n-space>
+            </template>
+            <template v-else>
+              <n-empty description="选择一套已生成的考核题后，这里会显示详细内容。" />
+            </template>
+          </n-card>
+        </n-grid-item>
+      </n-grid>
+    </n-space>
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed } from 'vue'; // 引入 computed
+import { computed, onMounted, reactive, ref } from 'vue';
 import type { FormInst } from 'naive-ui';
-import { marked } from 'marked'; // 引入 marked 库
+import { marked } from 'marked';
 import { formRules } from '@/utils';
-import _axios from '@/utils/request'; // 引入封装的 axios 实例
-import type { AssessmentRequestPayload, AssessmentApiResponse } from '@/types/assessment'; // 导入我们定义的类型
+import _axios from '@/utils/request';
+import type { AssessmentRequestPayload, AssessmentApiResponse, GeneratedQuestionSet } from '@/types/assessment';
 
-// 表单引用
 const formRef = ref<HTMLElement & FormInst>();
-// 加载状态
 const isLoading = ref(false);
-// 考核题目内容 (Markdown 格式)
-const assessmentContent = ref<string | null>(null);
+const generatedAssessments = ref<GeneratedQuestionSet[]>([]);
+const selectedAssessment = ref<GeneratedQuestionSet | null>(null);
 
-// 使用 computed 属性将 Markdown 转换为 HTML
-const assessmentHtml = computed(() => {
-  if (assessmentContent.value) {
-    // marked.parse() 将 Markdown 字符串转换为 HTML 字符串
-    return marked.parse(assessmentContent.value);
-  }
-  return ''; // 如果没有内容，返回空字符串
-});
+const assessmentHtml = computed(() => marked.parse(selectedAssessment.value?.content || ''));
 
-// 表单数据
-const assesment = reactive<AssessmentRequestPayload>({
+const assessment = reactive<AssessmentRequestPayload>({
   topic: '',
-  question_type: null,
-  difficulty_level: null,
-  num_questions: null
+  question_type: '选择题',
+  difficulty_level: '中等',
+  num_questions: 3
 });
 
-const question_type_options = [
+const questionTypeOptions = [
   { label: '选择题', value: '选择题' },
   { label: '填空题', value: '填空题' },
   { label: '简答题', value: '简答题' },
   { label: '编程题', value: '编程题' }
 ];
 
-const difficulty_level_options = [
+const difficultyLevelOptions = [
   { label: '简单', value: '简单' },
   { label: '中等', value: '中等' },
   { label: '困难', value: '困难' }
 ];
 
-// 注意：题目数量的 options 之前是“课时”，这里改成“题目数量”
-const num_questions_options = Array.from({ length: 50 }, (_, i) => ({
-  // 假设最多生成50道题
+const numQuestionsOptions = Array.from({ length: 20 }, (_, i) => ({
   label: `${i + 1}题`,
   value: i + 1
 }));
 
-// 表单验证规则 (您需要确保 formRules 中有 topic, question_type, difficulty_level, num_questions 的规则)
-const assessment_rules = {
-  // 更改为 assessment_rules，与表单绑定
+const assessmentRules = {
   topic: formRules.topic,
   question_type: formRules.question_type,
   difficulty_level: formRules.difficulty_level,
   num_questions: formRules.num_questions
 };
 
-// 提交处理函数
+function formatDate(value: string) {
+  return new Date(value).toLocaleString('zh-CN');
+}
+
+async function fetchGeneratedAssessments() {
+  try {
+    const response = await _axios.get<GeneratedQuestionSet[]>('/api/teacher/generated-assessments');
+    generatedAssessments.value = response.data;
+    if (selectedAssessment.value) {
+      const latest = response.data.find(item => item.id === selectedAssessment.value?.id);
+      if (latest) {
+        selectedAssessment.value = latest;
+      }
+    }
+  } catch (error: any) {
+    console.error('加载考核题列表失败:', error);
+    window.$message?.error(error?.response?.data?.detail || '加载考核题列表失败');
+  }
+}
+
+async function selectAssessment(id: string) {
+  try {
+    const response = await _axios.get<GeneratedQuestionSet>(`/api/teacher/generated-assessments/${id}`);
+    selectedAssessment.value = response.data;
+  } catch (error: any) {
+    console.error('加载考核题详情失败:', error);
+    window.$message?.error(error?.response?.data?.detail || '加载考核题详情失败');
+  }
+}
+
+async function deleteAssessment(id: string) {
+  try {
+    await _axios.delete(`/api/teacher/generated-assessments/${id}`);
+    if (selectedAssessment.value?.id === id) {
+      selectedAssessment.value = null;
+    }
+    await fetchGeneratedAssessments();
+    window.$message?.success('考核题删除成功');
+  } catch (error: any) {
+    console.error('删除考核题失败:', error);
+    window.$message?.error(error?.response?.data?.detail || '删除考核题失败');
+  }
+}
+
 const handleSubmit = async () => {
   try {
     isLoading.value = true;
-    // 1. 表单验证
     await formRef.value?.validate();
-
-    // 2. 构造请求体数据，并处理可能为 null 的字段
-    const requestPayload: AssessmentRequestPayload = {
-      topic: assesment.topic,
-      question_type: assesment.question_type || '', // 如果为 null，发送空字符串或根据后端要求
-      difficulty_level: assesment.difficulty_level || '', // 如果为 null，发送空字符串或根据后端要求
-      num_questions: assesment.num_questions || 0 // 如果为 null，发送 0 或根据后端要求
-    };
-
-    // 3. 调用接口
-    const response = await _axios.post<AssessmentApiResponse>('/api/teacher/assessment/generate', requestPayload);
-
-    // 4. 处理接口响应
+    const response = await _axios.post<AssessmentApiResponse>('/api/teacher/assessment/generate', assessment);
     if (response.data.status === 'success') {
-      window.$message?.success('考核题目生成成功！');
-      assessmentContent.value = response.data.assessment_content; // 更新考核题目内容
-      // eslint-disable-next-line no-console
-      console.log('生成的考核题目 (Markdown):', assessmentContent.value);
+      window.$message?.success('考核题目生成成功');
+      await fetchGeneratedAssessments();
+      await selectAssessment(response.data.resource_id);
     } else {
-      window.$message?.error(response.data.assessment_content || '考核题目生成失败！');
-      assessmentContent.value = null; // 清空旧内容
+      window.$message?.error('考核题目生成失败');
     }
-  } catch (errors) {
-    window.$message?.error('请检查表单填写或网络状况');
-    assessmentContent.value = null; // 清空旧内容
+  } catch (error: any) {
+    console.error('生成考核题失败:', error);
+    window.$message?.error(error?.response?.data?.detail || '请检查表单填写或网络状况');
   } finally {
-    isLoading.value = false; // 无论成功失败都关闭加载状态
+    isLoading.value = false;
   }
 };
+
+onMounted(fetchGeneratedAssessments);
 </script>
 
 <style scoped>
-/* 这是一个基础的 Markdown 样式，以让渲染出来的 HTML 有更好的可读性 */
-/* 您可以根据需要进行调整和美化 */
+.assessment-card {
+  cursor: pointer;
+}
+
+.assessment-card--active {
+  outline: 1px solid rgb(59 130 246 / 45%);
+  background: rgb(239 246 255 / 70%);
+}
+
 .markdown-body :deep(h1),
 .markdown-body :deep(h2),
 .markdown-body :deep(h3),
@@ -155,47 +247,11 @@ const handleSubmit = async () => {
 .markdown-body :deep(h6) {
   margin-top: 1em;
   margin-bottom: 0.5em;
-  font-weight: bold;
+  font-weight: 700;
 }
 
 .markdown-body :deep(p) {
   margin-bottom: 0.8em;
-  line-height: 1.6;
-}
-
-.markdown-body :deep(ul),
-.markdown-body :deep(ol) {
-  margin-left: 20px;
-  margin-bottom: 0.8em;
-}
-
-.markdown-body :deep(li) {
-  margin-bottom: 0.4em;
-}
-
-.markdown-body :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: 1em;
-}
-
-.markdown-body :deep(th),
-.markdown-body :deep(td) {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-}
-
-.markdown-body :deep(th) {
-  background-color: #f2f2f2;
-}
-
-/* 调整卡片内容垂直间距，如果需要 */
-.n-card__content.n-card__content {
-  padding-bottom: 16px;
-}
-
-.mt-20px {
-  margin-top: 20px;
+  line-height: 1.7;
 }
 </style>

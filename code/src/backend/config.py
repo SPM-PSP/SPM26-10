@@ -7,9 +7,23 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 
+def _build_database_url() -> str:
+    explicit_url = os.getenv("DATABASE_URL", "").strip()
+    if explicit_url:
+        return explicit_url
+
+    db_user = os.getenv("DB_USER", "root")
+    db_password = os.getenv("DB_PASSWORD", "123456")
+    db_host = os.getenv("DB_HOST", "127.0.0.1")
+    db_port = os.getenv("DB_PORT", "3306")
+    db_name = os.getenv("DB_NAME", "educational_platform")
+
+    return f"mysql+aiomysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+
 class Settings:
     # 数据库配置
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql+aiomysql://root:123456@localhost:3306/educational_platform")
+    DATABASE_URL: str = _build_database_url()
 
     # LLM 配置
     LLM_MODE: str = os.getenv("LLM_MODE", "local").lower()  # local | api | hybrid

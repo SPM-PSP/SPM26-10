@@ -40,6 +40,16 @@ const theme = useThemeStore();
 
 const actions = [
   {
+    title: '我的班级',
+    description: '输入班级码加入教师创建的班级，并管理自己的课程入口。',
+    routeName: 'student_classes'
+  },
+  {
+    title: '班级试卷',
+    description: '查看教师发布到班级的试卷，完成作答并接收即时批改。',
+    routeName: 'student_papers'
+  },
+  {
     title: '在线问答',
     description: '基于课程知识库提问，边生成边显示回答。',
     routeName: 'student_online_ask'

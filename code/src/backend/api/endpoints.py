@@ -1,8 +1,11 @@
+import json
 import os
-from sqlalchemy import select, func, text, and_
+import re
+import secrets
+from sqlalchemy import select, func, text, and_, inspect
 from fastapi import APIRouter, HTTPException, Depends, status, Header,Query
 from fastapi.responses import StreamingResponse
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 import uuid # 用于生成唯一ID
 import hashlib # 用于密码哈希
 import time
@@ -10,13 +13,25 @@ from src.backend.core.llm_manager import generate_text_with_qwen3, initialize_ll
 from src.backend.rag_pipeline.vector_store_manager import initialize_vector_store
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.backend.database import User, LessonPlanTimeLog, CorrectionTimeLog,get_db, Resource,Course,UserActivityLog,StudentPerformance
+from sqlalchemy.orm import selectinload
+from src.backend.database import (
+    User, LessonPlanTimeLog, CorrectionTimeLog, get_db, Resource, Course, UserActivityLog,
+    StudentPerformance, Classroom, ClassMember, Paper, PaperSection, PaperQuestion,
+    PaperPublication, PaperSubmission, PaperSubmissionAnswer, GeneratedQuestion
+)
 from src.backend.api.models import (
     LoginRequest, LoginResponse,LessonPlanRequest, LessonPlanResponse,
     AssessmentQuestionRequest, AssessmentQuestionResponse,StudentAnswerCorrectionRequest, CorrectionFeedbackResponse,
     StudentQuestionRequest, StudentQuestionResponse,PracticeQuestionRequest, PracticeQuestionResponse,DashboardMetrics,
     UserCreateRequest, UserCreateResponse, UserResponse,ResourceMetadata, DashboardMetrics,ResourceContentResponse,
-UserInfoResponse
+UserInfoResponse, ClassCreateRequest, ClassJoinRequest, ClassResponse, ClassDetailResponse,
+    ClassMemberResponse, PaperFromLessonPlanRequest, PaperUpdateRequest, PaperPublicationRequest,
+    PaperResponse, PaperSectionResponse, PaperQuestionResponse, PaperPublicationResponse,
+    StudentPaperListItem, StudentPaperDetailResponse, PaperSubmissionRequest,
+    PaperSubmissionResponse, PaperSubmissionAnswerResponse, TeacherPaperSubmissionSummary,
+    GeneratedQuestionResponse, GeneratedQuestionSetResponse, LessonPlanDetailResponse,
+    LessonPlanUpdateRequest, LessonPlanReviseRequest, AppendGeneratedQuestionsRequest,
+    PracticeSubmissionRequest, PracticeSubmissionResponse, PracticeSubmissionAnswerResponse
 )
 from datetime import datetime, timedelta, timezone
 
@@ -30,6 +45,7 @@ _embeddings_model = None
 # --- 全局内存会话管理---
 # 存储 session_id -> User 对象的映射。ps：这在服务器重启后会丢失所有会话！
 active_sessions: Dict[str, User] = {}
+VALID_QUESTION_TYPES = {"选择题", "填空题", "简答题", "编程题"}
 
 # 简单的密码哈希函数
 def hash_password_simple(password: str) -> str:
@@ -65,7 +81,7 @@ def initialize_global_resources():
 
 #封装对CodeGeeX4的调用，并处理 LLM 侧的异常
 async def _get_llm_response(system_instruction: str,user_question: str,retrieved_documents_content: List[str],
-        final_instruction: str,max_new_tokens: int | None = 512,temperature: float = 0.7,top_p: float = 0.9) -> str:
+        final_instruction: str,max_new_tokens: int | None = None,temperature: float = 0.7,top_p: float = 0.9) -> str:
     try:
         started_at = time.perf_counter()
         response = generate_text_with_qwen3(
@@ -151,6 +167,454 @@ async def _log_user_activity(db: AsyncSession, user_id: uuid.UUID, activity_type
         await db.rollback()
         print(f"Failed to log user activity {activity_type} for user {user_id}: {e}")
 
+
+def _generate_class_code(length: int = 6) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+async def _create_unique_class_code(db: AsyncSession) -> str:
+    while True:
+        class_code = _generate_class_code()
+        result = await db.execute(select(Classroom).where(Classroom.class_code == class_code))
+        if result.scalar_one_or_none() is None:
+            return class_code
+
+
+def _read_resource_file(file_path: Optional[str]) -> str:
+    if not file_path:
+        return ""
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(os.getcwd(), file_path)
+    if not os.path.exists(file_path):
+        return ""
+    with open(file_path, "r", encoding="utf-8") as file:
+        return file.read()
+
+
+def _write_resource_file(file_path: Optional[str], content: str) -> None:
+    if not file_path:
+        raise HTTPException(status_code=500, detail="资源文件路径无效。")
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(os.getcwd(), file_path)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(content)
+
+
+def _delete_resource_file(file_path: Optional[str]) -> None:
+    if not file_path:
+        return
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(os.getcwd(), file_path)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+
+def _extract_markdown_sections(markdown_text: str, max_sections: int = 4) -> List[Dict[str, str]]:
+    heading_pattern = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
+    matches = list(heading_pattern.finditer(markdown_text))
+    sections: List[Dict[str, str]] = []
+
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown_text)
+        title = match.group(2).strip()
+        content = markdown_text[start:end].strip()
+        if content:
+            sections.append({"title": title, "content": content})
+        if len(sections) >= max_sections:
+            break
+
+    if sections:
+        return sections
+
+    fallback_chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", markdown_text) if chunk.strip()]
+    for index, chunk in enumerate(fallback_chunks[:max_sections], start=1):
+        sections.append({"title": f"模块 {index}", "content": chunk})
+    return sections
+
+
+def _strip_json_fence(text_value: str) -> str:
+    cleaned = text_value.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_question_type(raw_value: Optional[str], requested_type: str = "简答题") -> Literal["选择题", "填空题", "简答题", "编程题"]:
+    if raw_value in VALID_QUESTION_TYPES:
+        return raw_value  # type: ignore[return-value]
+    if requested_type in VALID_QUESTION_TYPES:
+        return requested_type  # type: ignore[return-value]
+    return "简答题"
+
+
+def _normalize_options(raw_value: Any) -> List[str]:
+    if isinstance(raw_value, list):
+        return [str(item).strip() for item in raw_value if str(item).strip()]
+    if isinstance(raw_value, str) and raw_value.strip():
+        return [part.strip() for part in re.split(r"\n+|；|;|\|", raw_value) if part.strip()]
+    return []
+
+
+def _render_questions_markdown(title: str, questions: List[Dict[str, Any]]) -> str:
+    lines = [f"# {title}", ""]
+    for index, question in enumerate(questions, start=1):
+        question_type = str(question.get("question_type") or "简答题")
+        question_content = str(question.get("question_content") or "").strip()
+        reference_answer = str(question.get("reference_answer") or "").strip()
+        options = _normalize_options(question.get("options"))
+
+        lines.append(f"## 题目{index}（{question_type}）")
+        lines.append(question_content or "暂无题目内容")
+
+        if question_type == "选择题" and options:
+            lines.append("")
+            for option_index, option in enumerate(options):
+                option_label = chr(ord("A") + option_index)
+                lines.append(f"{option_label}. {option}")
+
+        lines.append("")
+        lines.append(f"参考答案{index}: {reference_answer or '暂无参考答案'}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _generated_question_to_response(question: GeneratedQuestion) -> GeneratedQuestionResponse:
+    return GeneratedQuestionResponse(
+        id=question.id,
+        resource_id=question.resource_id,
+        question_type=_normalize_question_type(question.question_type),
+        question_content=question.question_content,
+        options=_normalize_options(question.options_json),
+        reference_answer=question.reference_answer,
+        score=question.score,
+        difficulty_level=question.difficulty_level,
+        sort_order=question.sort_order,
+        metadata_json=question.metadata_json
+    )
+
+
+def _resource_to_generated_question_set_response(resource: Resource, content: Optional[str] = None) -> GeneratedQuestionSetResponse:
+    ordered_questions = sorted(resource.generated_questions or [], key=lambda item: item.sort_order)
+    return GeneratedQuestionSetResponse(
+        id=resource.id,
+        title=resource.title,
+        resource_type=resource.resource_type,
+        created_by_user_id=resource.created_by_user_id,
+        created_at=resource.created_at,
+        subject=resource.subject,
+        metadata_json=resource.metadata_json,
+        content=content if content is not None else _read_resource_file(resource.file_path),
+        questions=[_generated_question_to_response(question) for question in ordered_questions]
+    )
+
+
+async def _replace_generated_questions(
+    db: AsyncSession,
+    resource_id: str,
+    questions: List[Dict[str, Any]]
+) -> None:
+    existing_result = await db.execute(select(GeneratedQuestion).where(GeneratedQuestion.resource_id == resource_id))
+    for existing in existing_result.scalars().all():
+        await db.delete(existing)
+
+    for index, question in enumerate(questions, start=1):
+        db.add(
+            GeneratedQuestion(
+                resource_id=resource_id,
+                question_type=_normalize_question_type(str(question.get("question_type") or "")),
+                question_content=str(question.get("question_content") or "").strip(),
+                options_json=_normalize_options(question.get("options")),
+                reference_answer=str(question.get("reference_answer") or "").strip() or None,
+                score=float(question.get("score") or 10.0),
+                difficulty_level=str(question.get("difficulty_level") or "").strip() or None,
+                sort_order=int(question.get("sort_order") or index),
+                metadata_json=question.get("metadata_json") if isinstance(question.get("metadata_json"), dict) else None
+            )
+        )
+
+
+async def _generate_structured_questions(
+    *,
+    topic_or_title: str,
+    source_content: str,
+    question_type: str,
+    difficulty_level: str,
+    num_questions: int,
+    retrieved_documents_content: List[str]
+) -> List[Dict[str, Any]]:
+    requested_type = question_type if question_type in VALID_QUESTION_TYPES else "混合"
+    type_requirement = (
+        "题目类型可以混合，但每一道题的 question_type 字段必须严格填写为“选择题”“填空题”“简答题”或“编程题”之一，绝不能填写“混合”。"
+        if requested_type == "混合"
+        else f"所有题目的 question_type 字段都必须严格填写为“{requested_type}”。"
+    )
+
+    system_instruction = "你是一位严谨的课程命题老师，请严格按 JSON 生成题目数据。"
+    user_question = f"""请围绕以下主题生成 {num_questions} 道{difficulty_level}难度题目。
+
+主题：{topic_or_title}
+内容材料：
+{source_content[:3500] if source_content else topic_or_title}
+
+{type_requirement}
+
+请返回一个 JSON 数组，每个元素必须包含以下字段：
+- question_type
+- question_content
+- options（仅选择题需要，其他题型返回空数组）
+- reference_answer
+- score
+- difficulty_level
+
+要求：
+1. 只返回合法 JSON。
+2. 选择题必须提供 4 个选项。
+3. 不能把“混合”当作具体题型值。
+4. 编程题的参考答案可以是关键代码或核心思路。
+"""
+    final_instruction = "只返回合法 JSON 数组，不要输出任何解释。"
+
+    llm_response = await _get_llm_response(
+        system_instruction=system_instruction,
+        user_question=user_question,
+        retrieved_documents_content=retrieved_documents_content,
+        final_instruction=final_instruction,
+        max_new_tokens=None,
+        temperature=0.5,
+        top_p=0.8
+    )
+    cleaned = _strip_json_fence(llm_response)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            normalized: List[Dict[str, Any]] = []
+            for index, item in enumerate(parsed[:num_questions], start=1):
+                if not isinstance(item, dict):
+                    continue
+                actual_type = _normalize_question_type(str(item.get("question_type") or ""), requested_type if requested_type != "混合" else "简答题")
+                options = _normalize_options(item.get("options"))
+                if actual_type == "选择题" and len(options) < 2:
+                    options = ["选项A", "选项B", "选项C", "选项D"]
+                normalized.append(
+                    {
+                        "question_type": actual_type,
+                        "question_content": str(item.get("question_content") or "").strip(),
+                        "options": options if actual_type == "选择题" else [],
+                        "reference_answer": str(item.get("reference_answer") or "").strip(),
+                        "score": float(item.get("score") or 10),
+                        "difficulty_level": str(item.get("difficulty_level") or difficulty_level),
+                        "sort_order": index
+                    }
+                )
+            if normalized:
+                return normalized
+    except Exception as exc:
+        print(f"解析结构化题目 JSON 失败: {exc}")
+
+    fallback_questions: List[Dict[str, Any]] = []
+    fallback_types = [requested_type] if requested_type in VALID_QUESTION_TYPES else ["选择题", "填空题", "简答题", "编程题"]
+    for index in range(num_questions):
+        actual_type = fallback_types[index % len(fallback_types)]
+        fallback_questions.append(
+            {
+                "question_type": actual_type,
+                "question_content": f"{topic_or_title} - 题目 {index + 1}\n请围绕给定内容进行作答。",
+                "options": ["选项A", "选项B", "选项C", "选项D"] if actual_type == "选择题" else [],
+                "reference_answer": source_content[:400] or topic_or_title,
+                "score": 10.0,
+                "difficulty_level": difficulty_level,
+                "sort_order": index + 1
+            }
+        )
+    return fallback_questions
+
+
+async def _generate_questions_for_section(
+    section_title: str,
+    section_content: str,
+    question_type: str,
+    difficulty_level: str,
+    questions_per_section: int
+) -> List[Dict[str, Any]]:
+    return await _generate_structured_questions(
+        topic_or_title=section_title,
+        source_content=section_content,
+        question_type=question_type,
+        difficulty_level=difficulty_level,
+        num_questions=questions_per_section,
+        retrieved_documents_content=[]
+    )
+
+
+async def _grade_answer_with_model(
+    *,
+    question_type: str,
+    question_content: str,
+    reference_answer: Optional[str],
+    score: float,
+    student_answer: str,
+    options: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    system_instruction = "你是一位严格的课程阅卷老师，请根据题目和参考答案对学生答案评分，并返回 JSON。"
+    max_score = float(score)
+    option_text = ""
+    if options:
+        option_text = "\n".join([f"{chr(ord('A') + idx)}. {item}" for idx, item in enumerate(options)])
+    user_question = f"""请批改以下试卷题目答案。
+
+题目类型：{question_type}
+题目内容：{question_content}
+{f"选项：{option_text}" if option_text else ""}
+参考答案：{reference_answer or '无'}
+题目满分：{score}
+学生答案：{student_answer}
+
+请返回一个 JSON 对象，字段如下：
+- score：数值，范围 0 到 {score}
+- is_correct：布尔值
+- auto_feedback：文字反馈
+- error_tags_json：对象，至少包含 errors 数组和 summary 字段
+
+不要输出任何解释，只返回 JSON。"""
+    final_instruction = "只返回合法 JSON 对象。"
+    llm_response = await _get_llm_response(
+        system_instruction=system_instruction,
+        user_question=user_question,
+        retrieved_documents_content=[],
+        final_instruction=final_instruction,
+        max_new_tokens=None,
+        temperature=0.3,
+        top_p=0.8
+    )
+    cleaned = _strip_json_fence(llm_response)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            parsed_score = float(parsed.get("score", 0))
+            parsed_score = max(0.0, min(parsed_score, max_score))
+            return {
+                "score": parsed_score,
+                "is_correct": bool(parsed.get("is_correct", parsed_score >= max_score * 0.6)),
+                "auto_feedback": str(parsed.get("auto_feedback") or "").strip(),
+                "error_tags_json": parsed.get("error_tags_json") if isinstance(parsed.get("error_tags_json"), dict) else None
+            }
+    except Exception as exc:
+        print(f"解析批改 JSON 失败: {exc}")
+
+    return {
+        "score": 0.0,
+        "is_correct": False,
+        "auto_feedback": "系统未能稳定解析本题批改结果，请教师复核。",
+        "error_tags_json": {"errors": ["批改解析失败"], "summary": "需要人工复核"}
+    }
+
+
+async def _grade_paper_answer(question: PaperQuestion, student_answer: str) -> Dict[str, Any]:
+    return await _grade_answer_with_model(
+        question_type=question.question_type,
+        question_content=question.question_content,
+        reference_answer=question.reference_answer,
+        score=float(question.score),
+        student_answer=student_answer,
+        options=_normalize_options((question.metadata_json or {}).get("options")) if isinstance(question.metadata_json, dict) else None
+    )
+
+
+def _paper_question_to_response(question: PaperQuestion) -> PaperQuestionResponse:
+    return PaperQuestionResponse(
+        id=question.id,
+        question_type=question.question_type,
+        question_content=question.question_content,
+        reference_answer=question.reference_answer,
+        score=question.score,
+        difficulty_level=question.difficulty_level,
+        sort_order=question.sort_order,
+        metadata_json=question.metadata_json
+    )
+
+
+def _paper_section_to_response(section: PaperSection) -> PaperSectionResponse:
+    questions = sorted(section.questions, key=lambda item: item.sort_order)
+    return PaperSectionResponse(
+        id=section.id,
+        section_title=section.section_title,
+        source_module_name=section.source_module_name,
+        sort_order=section.sort_order,
+        questions=[_paper_question_to_response(question) for question in questions]
+    )
+
+
+def _paper_to_response(paper: Paper) -> PaperResponse:
+    sections = sorted(paper.sections, key=lambda item: item.sort_order)
+    state = inspect(paper)
+    publication_count = 0 if "publications" in state.unloaded else len(paper.publications or [])
+    return PaperResponse(
+        id=paper.id,
+        title=paper.title,
+        source_resource_id=paper.source_resource_id,
+        created_by_teacher_id=paper.created_by_teacher_id,
+        class_id=paper.class_id,
+        status=paper.status,
+        total_score=paper.total_score,
+        metadata_json=paper.metadata_json,
+        created_at=paper.created_at,
+        updated_at=paper.updated_at,
+        sections=[_paper_section_to_response(section) for section in sections],
+        publication_count=publication_count
+    )
+
+
+def _paper_to_student_response(paper: Paper) -> PaperResponse:
+    base_response = _paper_to_response(paper)
+    sanitized_sections: List[PaperSectionResponse] = []
+    for section in base_response.sections:
+        sanitized_sections.append(
+            PaperSectionResponse(
+                id=section.id,
+                section_title=section.section_title,
+                source_module_name=section.source_module_name,
+                sort_order=section.sort_order,
+                questions=[
+                    PaperQuestionResponse(
+                        id=question.id,
+                        question_type=question.question_type,
+                        question_content=question.question_content,
+                        reference_answer=None,
+                        score=question.score,
+                        difficulty_level=question.difficulty_level,
+                        sort_order=question.sort_order,
+                        metadata_json=question.metadata_json
+                    )
+                    for question in section.questions
+                ]
+            )
+        )
+    return PaperResponse(**base_response.model_dump(exclude={"sections"}), sections=sanitized_sections)
+
+
+def _class_to_response(classroom: Classroom, member_count: Optional[int] = None) -> ClassResponse:
+    state = inspect(classroom)
+    teacher = None if "teacher" in state.unloaded else classroom.teacher
+    members = [] if "members" in state.unloaded else list(classroom.members or [])
+    active_members = [member for member in members if member.status == "active"]
+    return ClassResponse(
+        id=classroom.id,
+        name=classroom.name,
+        description=classroom.description,
+        class_code=classroom.class_code,
+        teacher_id=classroom.teacher_id,
+        teacher_name=teacher.username if teacher else None,
+        status=classroom.status,
+        created_at=classroom.created_at,
+        updated_at=classroom.updated_at,
+        member_count=member_count if member_count is not None else len(active_members)
+    )
+
 # 认证接口-----------------------
 #用户登录接口（对应前端fetchLogin)
 #成功后返回一个临时的会话ID (Session ID)；请将此 Session ID 存储在前端，并在后续请求中通过 X-Session-ID 头发送
@@ -181,6 +645,8 @@ async def login_api(request: LoginRequest, db: AsyncSession = Depends(get_db)):
             message="登录成功",
             session_id=session_id
         )
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"登录过程中发生错误: {e}")
         raise HTTPException(
@@ -216,7 +682,1478 @@ async def logout_api(session_id: str = Header(..., alias="X-Session-ID")):
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的会话ID。")
 
+# 班级与试卷 API-----------------
+
+@router.post("/teacher/classes", response_model=ClassResponse, summary="教师创建班级")
+async def create_class_api(
+    request: ClassCreateRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无教师或管理员权限。")
+
+    classroom = Classroom(
+        name=request.name,
+        description=request.description,
+        class_code=await _create_unique_class_code(db),
+        teacher_id=current_user.id,
+        status="active"
+    )
+    db.add(classroom)
+    await db.commit()
+    await db.refresh(classroom)
+    await _log_user_activity(db, current_user.id, "create_class", {"class_id": classroom.id, "class_code": classroom.class_code})
+    return _class_to_response(classroom, member_count=0)
+
+
+@router.get("/teacher/classes", response_model=List[ClassResponse], summary="教师获取自己的班级列表")
+async def get_teacher_classes_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无教师或管理员权限。")
+
+    query = select(Classroom).options(selectinload(Classroom.teacher), selectinload(Classroom.members))
+    if current_user.role == "teacher":
+        query = query.where(Classroom.teacher_id == current_user.id)
+    query = query.where(Classroom.status != "dissolved")
+    result = await db.execute(query.order_by(Classroom.created_at.desc()))
+    classrooms = result.scalars().unique().all()
+    return [_class_to_response(classroom) for classroom in classrooms]
+
+
+@router.get("/teacher/classes/{class_id}", response_model=ClassDetailResponse, summary="教师获取班级详情和成员")
+async def get_teacher_class_detail_api(
+    class_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Classroom)
+        .options(selectinload(Classroom.teacher), selectinload(Classroom.members).selectinload(ClassMember.student))
+        .where(Classroom.id == class_id)
+    )
+    classroom = result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级不存在。")
+    if classroom.status == "dissolved":
+        raise HTTPException(status_code=400, detail="班级已解散。")
+    if current_user.role == "teacher" and classroom.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该班级。")
+
+    members = [
+        ClassMemberResponse(
+            id=member.id,
+            student_id=member.student_id,
+            student_name=member.student.username if member.student else f"学生{member.student_id}",
+            joined_at=member.joined_at,
+            status=member.status
+        )
+        for member in classroom.members if member.status == "active"
+    ]
+    base = _class_to_response(classroom)
+    return ClassDetailResponse(**base.model_dump(), members=members)
+
+
+@router.post("/teacher/classes/{class_id}/dissolve", response_model=ClassResponse, summary="教师解散班级")
+async def dissolve_teacher_class_api(
+    class_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Classroom).options(selectinload(Classroom.teacher), selectinload(Classroom.members)).where(Classroom.id == class_id)
+    )
+    classroom = result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级不存在。")
+    if current_user.role == "teacher" and classroom.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权解散该班级。")
+    if classroom.status == "dissolved":
+        return _class_to_response(classroom, member_count=0)
+
+    classroom.status = "dissolved"
+    for member in classroom.members:
+        if member.status == "active":
+            member.status = "removed"
+
+    await db.commit()
+    await db.refresh(classroom)
+    await _log_user_activity(db, current_user.id, "dissolve_class", {"class_id": class_id})
+    return _class_to_response(classroom, member_count=0)
+
+
+@router.delete("/teacher/classes/{class_id}/members/{student_id}", response_model=ClassDetailResponse, summary="教师移除班级成员")
+async def remove_student_from_class_api(
+    class_id: str,
+    student_id: int,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Classroom)
+        .options(selectinload(Classroom.teacher), selectinload(Classroom.members).selectinload(ClassMember.student))
+        .where(Classroom.id == class_id)
+    )
+    classroom = result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级不存在。")
+    if current_user.role == "teacher" and classroom.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权管理该班级成员。")
+
+    target_member = next((member for member in classroom.members if member.student_id == student_id and member.status == "active"), None)
+    if target_member is None:
+        raise HTTPException(status_code=404, detail="该学生不在当前班级中。")
+
+    target_member.status = "removed"
+    await db.commit()
+    await db.refresh(classroom)
+    await _log_user_activity(db, current_user.id, "remove_class_member", {"class_id": class_id, "student_id": student_id})
+
+    members = [
+        ClassMemberResponse(
+            id=member.id,
+            student_id=member.student_id,
+            student_name=member.student.username if member.student else f"学生{member.student_id}",
+            joined_at=member.joined_at,
+            status=member.status
+        )
+        for member in classroom.members if member.status == "active"
+    ]
+    return ClassDetailResponse(**_class_to_response(classroom).model_dump(), members=members)
+
+
+@router.post("/student/classes/join", response_model=ClassResponse, summary="学生通过班级码加入班级")
+async def join_class_api(
+    request: ClassJoinRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可加入班级。")
+
+    result = await db.execute(
+        select(Classroom).options(selectinload(Classroom.teacher), selectinload(Classroom.members))
+        .where(Classroom.class_code == request.class_code.upper())
+    )
+    classroom = result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级码无效。")
+    if classroom.status == "dissolved":
+        raise HTTPException(status_code=400, detail="该班级已解散，无法加入。")
+
+    exists_result = await db.execute(
+        select(ClassMember).where(ClassMember.class_id == classroom.id, ClassMember.student_id == current_user.id)
+    )
+    existing_member = exists_result.scalar_one_or_none()
+    if existing_member:
+        if existing_member.status == "active":
+            raise HTTPException(status_code=400, detail="你已加入该班级。")
+        existing_member.status = "active"
+        existing_member.joined_at = datetime.now(timezone.utc)
+    else:
+        db.add(ClassMember(class_id=classroom.id, student_id=current_user.id, status="active"))
+    await db.commit()
+    await db.refresh(classroom)
+    await _log_user_activity(db, current_user.id, "join_class", {"class_id": classroom.id, "class_code": classroom.class_code})
+    active_member_count = len([member for member in (classroom.members or []) if member.status == "active"]) + (0 if existing_member else 1)
+    return _class_to_response(classroom, member_count=active_member_count)
+
+
+@router.get("/student/classes", response_model=List[ClassResponse], summary="学生获取已加入班级列表")
+async def get_student_classes_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可查看自己的班级。")
+
+    result = await db.execute(
+        select(ClassMember)
+        .options(selectinload(ClassMember.classroom).selectinload(Classroom.teacher), selectinload(ClassMember.classroom).selectinload(Classroom.members))
+        .where(ClassMember.student_id == current_user.id, ClassMember.status == "active")
+        .order_by(ClassMember.joined_at.desc())
+    )
+    memberships = result.scalars().all()
+    return [_class_to_response(member.classroom) for member in memberships if member.classroom and member.classroom.status == "active"]
+
+
+@router.post("/student/classes/{class_id}/leave", response_model=ClassResponse, summary="学生退出班级")
+async def leave_class_api(
+    class_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可退出班级。")
+
+    class_result = await db.execute(select(Classroom).options(selectinload(Classroom.teacher), selectinload(Classroom.members)).where(Classroom.id == class_id))
+    classroom = class_result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级不存在。")
+
+    membership_result = await db.execute(
+        select(ClassMember).where(ClassMember.class_id == class_id, ClassMember.student_id == current_user.id, ClassMember.status == "active")
+    )
+    membership = membership_result.scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(status_code=400, detail="你当前不在该班级中。")
+
+    membership.status = "left"
+    await db.commit()
+    await db.refresh(classroom)
+    await _log_user_activity(db, current_user.id, "leave_class", {"class_id": class_id})
+    return _class_to_response(classroom)
+
+
+@router.get("/teacher/resources", response_model=List[ResourceMetadata], summary="教师获取自己的资源列表")
+async def get_teacher_resources_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db),
+    resource_type: Optional[str] = Query(None)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    query = select(Resource)
+    if current_user.role == "teacher":
+        query = query.where(Resource.created_by_user_id == current_user.id)
+    if resource_type:
+        query = query.where(Resource.resource_type == resource_type)
+
+    result = await db.execute(query.order_by(Resource.created_at.desc()))
+    resources = result.scalars().all()
+    return [ResourceMetadata.model_validate(resource) for resource in resources]
+
+
+@router.get("/teacher/lesson-plans", response_model=List[LessonPlanDetailResponse], summary="教师获取教学计划列表")
+async def get_teacher_lesson_plans_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    query = select(Resource).where(Resource.resource_type == "lesson_plan")
+    if current_user.role == "teacher":
+        query = query.where(Resource.created_by_user_id == current_user.id)
+
+    result = await db.execute(query.order_by(Resource.created_at.desc()))
+    resources = result.scalars().all()
+    return [
+        LessonPlanDetailResponse(
+            id=resource.id,
+            title=resource.title,
+            created_by_user_id=resource.created_by_user_id,
+            created_at=resource.created_at,
+            metadata_json=resource.metadata_json,
+            subject=resource.subject,
+            content=_read_resource_file(resource.file_path)
+        )
+        for resource in resources
+    ]
+
+
+@router.get("/teacher/lesson-plans/{resource_id}", response_model=LessonPlanDetailResponse, summary="教师获取教学计划详情")
+async def get_teacher_lesson_plan_detail_api(
+    resource_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(select(Resource).where(Resource.id == resource_id, Resource.resource_type == "lesson_plan"))
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="教学计划不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该教学计划。")
+
+    return LessonPlanDetailResponse(
+        id=resource.id,
+        title=resource.title,
+        created_by_user_id=resource.created_by_user_id,
+        created_at=resource.created_at,
+        metadata_json=resource.metadata_json,
+        subject=resource.subject,
+        content=_read_resource_file(resource.file_path)
+    )
+
+
+@router.put("/teacher/lesson-plans/{resource_id}", response_model=LessonPlanDetailResponse, summary="教师手动修改教学计划")
+async def update_teacher_lesson_plan_api(
+    resource_id: str,
+    request: LessonPlanUpdateRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(select(Resource).where(Resource.id == resource_id, Resource.resource_type == "lesson_plan"))
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="教学计划不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修改该教学计划。")
+
+    _write_resource_file(resource.file_path, request.content)
+    resource.title = request.title
+    metadata = dict(resource.metadata_json or {})
+    metadata["last_manual_update_at"] = datetime.now(timezone.utc).isoformat()
+    resource.metadata_json = metadata
+    await db.commit()
+    await db.refresh(resource)
+    await _log_user_activity(db, current_user.id, "update_lesson_plan", {"resource_id": resource.id})
+
+    return LessonPlanDetailResponse(
+        id=resource.id,
+        title=resource.title,
+        created_by_user_id=resource.created_by_user_id,
+        created_at=resource.created_at,
+        metadata_json=resource.metadata_json,
+        subject=resource.subject,
+        content=request.content
+    )
+
+
+@router.post("/teacher/lesson-plans/{resource_id}/revise", response_model=LessonPlanDetailResponse, summary="教师基于意见二次修改教学计划")
+async def revise_teacher_lesson_plan_api(
+    resource_id: str,
+    request: LessonPlanReviseRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(select(Resource).where(Resource.id == resource_id, Resource.resource_type == "lesson_plan"))
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="教学计划不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修改该教学计划。")
+
+    original_content = _read_resource_file(resource.file_path)
+    if not original_content:
+        raise HTTPException(status_code=400, detail="教学计划内容为空，无法继续修改。")
+
+    revised_content = await _get_llm_response(
+        system_instruction="你是一位严谨的教学设计专家，请根据原教学计划和修改意见，输出完整的新教学计划。",
+        user_question=f"""原教学计划如下：
+{original_content}
+
+修改意见如下：
+{request.revision_instruction}
+
+请在保留原教学目标完整性的前提下，根据修改意见输出一份完整的新教学计划。""",
+        retrieved_documents_content=[],
+        final_instruction="请直接输出完整的新教学计划 Markdown 内容，不要附加解释。",
+        max_new_tokens=None,
+        temperature=0.6,
+        top_p=0.9
+    )
+
+    if request.save_as_new:
+        new_resource_id = str(uuid.uuid4())
+        file_dir = "generated_resources/lesson_plans"
+        os.makedirs(file_dir, exist_ok=True)
+        new_file_path = os.path.join(file_dir, f"{new_resource_id}.md")
+        _write_resource_file(new_file_path, revised_content)
+        new_resource = Resource(
+            id=new_resource_id,
+            title=request.title or f"{resource.title} - 修订版",
+            resource_type="lesson_plan",
+            created_by_user_id=current_user.id,
+            file_path=new_file_path,
+            metadata_json={**(resource.metadata_json or {}), "revision_of": resource.id, "revision_instruction": request.revision_instruction},
+            subject=resource.subject
+        )
+        db.add(new_resource)
+        await db.commit()
+        await db.refresh(new_resource)
+        await _log_user_activity(db, current_user.id, "revise_lesson_plan", {"resource_id": new_resource.id, "source_resource_id": resource.id})
+        return LessonPlanDetailResponse(
+            id=new_resource.id,
+            title=new_resource.title,
+            created_by_user_id=new_resource.created_by_user_id,
+            created_at=new_resource.created_at,
+            metadata_json=new_resource.metadata_json,
+            subject=new_resource.subject,
+            content=revised_content
+        )
+
+    _write_resource_file(resource.file_path, revised_content)
+    if request.title:
+        resource.title = request.title
+    metadata = dict(resource.metadata_json or {})
+    metadata["last_revision_instruction"] = request.revision_instruction
+    metadata["last_revision_at"] = datetime.now(timezone.utc).isoformat()
+    resource.metadata_json = metadata
+    await db.commit()
+    await db.refresh(resource)
+    await _log_user_activity(db, current_user.id, "revise_lesson_plan", {"resource_id": resource.id})
+    return LessonPlanDetailResponse(
+        id=resource.id,
+        title=resource.title,
+        created_by_user_id=resource.created_by_user_id,
+        created_at=resource.created_at,
+        metadata_json=resource.metadata_json,
+        subject=resource.subject,
+        content=revised_content
+    )
+
+
+@router.delete("/teacher/lesson-plans/{resource_id}", response_model=UserCreateResponse, summary="教师删除教学计划")
+async def delete_teacher_lesson_plan_api(
+    resource_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(select(Resource).where(Resource.id == resource_id, Resource.resource_type == "lesson_plan"))
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="教学计划不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权删除该教学计划。")
+
+    paper_result = await db.execute(select(func.count(Paper.id)).where(Paper.source_resource_id == resource_id, Paper.status != "deleted"))
+    if (paper_result.scalar_one_or_none() or 0) > 0:
+        raise HTTPException(status_code=400, detail="该教学计划已被试卷引用，请先删除或调整相关试卷。")
+
+    _delete_resource_file(resource.file_path)
+    await db.delete(resource)
+    await db.commit()
+    await _log_user_activity(db, current_user.id, "delete_lesson_plan", {"resource_id": resource_id})
+    return UserCreateResponse(status="success", message="教学计划删除成功。")
+
+
+@router.get("/teacher/generated-assessments", response_model=List[GeneratedQuestionSetResponse], summary="教师获取已生成考核题列表")
+async def get_teacher_generated_assessments_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    query = select(Resource).options(selectinload(Resource.generated_questions)).where(Resource.resource_type == "assessment")
+    if current_user.role == "teacher":
+        query = query.where(Resource.created_by_user_id == current_user.id)
+    result = await db.execute(query.order_by(Resource.created_at.desc()))
+    resources = result.scalars().unique().all()
+    return [_resource_to_generated_question_set_response(resource) for resource in resources]
+
+
+@router.get("/teacher/generated-assessments/{resource_id}", response_model=GeneratedQuestionSetResponse, summary="教师获取考核题详情")
+async def get_teacher_generated_assessment_detail_api(
+    resource_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Resource).options(selectinload(Resource.generated_questions)).where(Resource.id == resource_id, Resource.resource_type == "assessment")
+    )
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="考核题资源不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该考核题资源。")
+    return _resource_to_generated_question_set_response(resource)
+
+
+@router.delete("/teacher/generated-assessments/{resource_id}", response_model=UserCreateResponse, summary="教师删除已生成考核题")
+async def delete_teacher_generated_assessment_api(
+    resource_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Resource).options(selectinload(Resource.generated_questions)).where(Resource.id == resource_id, Resource.resource_type == "assessment")
+    )
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="考核题资源不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权删除该考核题资源。")
+
+    _delete_resource_file(resource.file_path)
+    for question in resource.generated_questions or []:
+        await db.delete(question)
+    await db.delete(resource)
+    await db.commit()
+    await _log_user_activity(db, current_user.id, "delete_generated_assessment", {"resource_id": resource_id})
+    return UserCreateResponse(status="success", message="考核题删除成功。")
+
+
+@router.get("/student/generated-practices", response_model=List[GeneratedQuestionSetResponse], summary="学生获取已生成练习列表")
+async def get_student_generated_practices_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可查看自己的练习。")
+
+    result = await db.execute(
+        select(Resource)
+        .options(selectinload(Resource.generated_questions))
+        .where(Resource.resource_type == "practice", Resource.created_by_user_id == current_user.id)
+        .order_by(Resource.created_at.desc())
+    )
+    resources = result.scalars().unique().all()
+    return [_resource_to_generated_question_set_response(resource) for resource in resources]
+
+
+@router.get("/student/generated-practices/{resource_id}", response_model=GeneratedQuestionSetResponse, summary="学生获取练习详情")
+async def get_student_generated_practice_detail_api(
+    resource_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可查看自己的练习。")
+
+    result = await db.execute(
+        select(Resource)
+        .options(selectinload(Resource.generated_questions))
+        .where(Resource.id == resource_id, Resource.resource_type == "practice", Resource.created_by_user_id == current_user.id)
+    )
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="练习资源不存在。")
+    return _resource_to_generated_question_set_response(resource)
+
+
+@router.delete("/student/generated-practices/{resource_id}", response_model=UserCreateResponse, summary="学生删除已生成练习")
+async def delete_student_generated_practice_api(
+    resource_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可删除自己的练习。")
+
+    result = await db.execute(
+        select(Resource)
+        .options(selectinload(Resource.generated_questions))
+        .where(Resource.id == resource_id, Resource.resource_type == "practice", Resource.created_by_user_id == current_user.id)
+    )
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="练习资源不存在。")
+
+    _delete_resource_file(resource.file_path)
+    for question in resource.generated_questions or []:
+        await db.delete(question)
+    await db.delete(resource)
+    await db.commit()
+    await _log_user_activity(db, current_user.id, "delete_generated_practice", {"resource_id": resource_id})
+    return UserCreateResponse(status="success", message="练习删除成功。")
+
+
+@router.post("/teacher/papers/from-lesson-plan", response_model=PaperResponse, summary="教师基于教学计划生成试卷草稿")
+async def create_paper_from_lesson_plan_api(
+    request: PaperFromLessonPlanRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    resource_result = await db.execute(select(Resource).where(Resource.id == request.source_resource_id))
+    resource = resource_result.scalar_one_or_none()
+    if resource is None or resource.resource_type != "lesson_plan":
+        raise HTTPException(status_code=404, detail="教学计划资源不存在。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权使用该教学计划生成试卷。")
+
+    lesson_plan_content = _read_resource_file(resource.file_path)
+    if not lesson_plan_content:
+        raise HTTPException(status_code=400, detail="教学计划内容为空或文件不存在。")
+
+    sections_data = _extract_markdown_sections(lesson_plan_content, max_sections=request.max_sections)
+    if not sections_data:
+        raise HTTPException(status_code=400, detail="未能从教学计划中提取有效模块。")
+
+    paper = Paper(
+        title=request.title or f"{resource.title} - 试卷草稿",
+        source_resource_id=resource.id,
+        created_by_teacher_id=current_user.id,
+        status="draft",
+        metadata_json={
+            "question_type": request.question_type,
+            "difficulty_level": request.difficulty_level,
+            "questions_per_section": request.questions_per_section
+        }
+    )
+    db.add(paper)
+    await db.flush()
+
+    total_score = 0.0
+    for section_index, section_data in enumerate(sections_data, start=1):
+        paper_section = PaperSection(
+            paper_id=paper.id,
+            section_title=section_data["title"],
+            source_module_name=section_data["title"],
+            sort_order=section_index
+        )
+        db.add(paper_section)
+        await db.flush()
+
+        generated_questions = await _generate_questions_for_section(
+            section_title=section_data["title"],
+            section_content=section_data["content"],
+            question_type=request.question_type,
+            difficulty_level=request.difficulty_level,
+            questions_per_section=request.questions_per_section
+        )
+
+        for question_index, question_data in enumerate(generated_questions, start=1):
+            score = float(question_data.get("score") or 10.0)
+            total_score += score
+            db.add(
+                PaperQuestion(
+                    paper_id=paper.id,
+                    section_id=paper_section.id,
+                    question_type=_normalize_question_type(question_data.get("question_type"), "简答题"),
+                    question_content=question_data["question_content"],
+                    reference_answer=question_data.get("reference_answer"),
+                    score=score,
+                    difficulty_level=question_data.get("difficulty_level"),
+                    sort_order=question_index,
+                    metadata_json={
+                        "source_module_name": section_data["title"],
+                        "options": _normalize_options(question_data.get("options"))
+                    }
+                )
+            )
+
+    paper.total_score = total_score
+    await db.commit()
+
+    result = await db.execute(
+        select(Paper)
+        .options(
+            selectinload(Paper.sections).selectinload(PaperSection.questions),
+            selectinload(Paper.publications)
+        )
+        .where(Paper.id == paper.id)
+    )
+    created_paper = result.scalar_one()
+    await _log_user_activity(db, current_user.id, "create_paper_from_lesson_plan", {"paper_id": created_paper.id, "resource_id": resource.id})
+    return _paper_to_response(created_paper)
+
+
+@router.get("/teacher/papers", response_model=List[PaperResponse], summary="教师获取试卷列表")
+async def get_teacher_papers_api(
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    query = select(Paper).options(
+        selectinload(Paper.sections).selectinload(PaperSection.questions),
+        selectinload(Paper.publications)
+    )
+    if current_user.role == "teacher":
+        query = query.where(Paper.created_by_teacher_id == current_user.id)
+    query = query.where(Paper.status != "deleted")
+    result = await db.execute(query.order_by(Paper.created_at.desc()))
+    papers = result.scalars().unique().all()
+    return [_paper_to_response(paper) for paper in papers]
+
+
+@router.get("/teacher/papers/{paper_id}", response_model=PaperResponse, summary="教师获取试卷详情")
+async def get_teacher_paper_detail_api(
+    paper_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Paper)
+        .options(
+            selectinload(Paper.sections).selectinload(PaperSection.questions),
+            selectinload(Paper.publications)
+        )
+        .where(Paper.id == paper_id)
+    )
+    paper = result.scalar_one_or_none()
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+    if current_user.role == "teacher" and paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该试卷。")
+    return _paper_to_response(paper)
+
+
+@router.put("/teacher/papers/{paper_id}", response_model=PaperResponse, summary="教师修改试卷草稿")
+async def update_teacher_paper_api(
+    paper_id: str,
+    request: PaperUpdateRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Paper)
+        .options(selectinload(Paper.sections).selectinload(PaperSection.questions), selectinload(Paper.publications))
+        .where(Paper.id == paper_id)
+    )
+    paper = result.scalar_one_or_none()
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+    if current_user.role == "teacher" and paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修改该试卷。")
+
+    paper.title = request.title
+    if request.status:
+        paper.status = request.status
+
+    for existing_section in paper.sections:
+        for existing_question in existing_section.questions:
+            await db.delete(existing_question)
+        await db.delete(existing_section)
+    await db.flush()
+
+    total_score = 0.0
+    for section_index, section_input in enumerate(request.sections, start=1):
+        section = PaperSection(
+            paper_id=paper.id,
+            section_title=section_input.section_title,
+            source_module_name=section_input.source_module_name,
+            sort_order=section_input.sort_order or section_index
+        )
+        db.add(section)
+        await db.flush()
+        for question_index, question_input in enumerate(section_input.questions, start=1):
+            total_score += float(question_input.score)
+            db.add(
+                PaperQuestion(
+                    paper_id=paper.id,
+                    section_id=section.id,
+                    question_type=_normalize_question_type(question_input.question_type, "简答题"),
+                    question_content=question_input.question_content,
+                    reference_answer=question_input.reference_answer,
+                    score=question_input.score,
+                    difficulty_level=question_input.difficulty_level,
+                    sort_order=question_input.sort_order or question_index,
+                    metadata_json={
+                        **(question_input.metadata_json or {}),
+                        "options": _normalize_options((question_input.metadata_json or {}).get("options"))
+                    }
+                )
+            )
+
+    paper.total_score = total_score
+    await db.commit()
+    refreshed = await db.execute(
+        select(Paper)
+        .options(selectinload(Paper.sections).selectinload(PaperSection.questions), selectinload(Paper.publications))
+        .where(Paper.id == paper.id)
+    )
+    updated_paper = refreshed.scalar_one()
+    return _paper_to_response(updated_paper)
+
+
+@router.post("/teacher/papers/{paper_id}/append-generated-questions", response_model=PaperResponse, summary="教师将已生成考核题追加到试卷草稿")
+async def append_generated_questions_to_paper_api(
+    paper_id: str,
+    request: AppendGeneratedQuestionsRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    paper_result = await db.execute(
+        select(Paper).options(selectinload(Paper.sections).selectinload(PaperSection.questions), selectinload(Paper.publications)).where(Paper.id == paper_id)
+    )
+    paper = paper_result.scalar_one_or_none()
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+    if current_user.role == "teacher" and paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修改该试卷。")
+    if paper.status != "draft":
+        raise HTTPException(status_code=400, detail="只有草稿试卷可以追加题目。")
+
+    resource_result = await db.execute(
+        select(Resource)
+        .options(selectinload(Resource.generated_questions))
+        .where(Resource.id == request.resource_id, Resource.resource_type == "assessment")
+    )
+    resource = resource_result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="未找到可追加的考核题资源。")
+    if current_user.role == "teacher" and resource.created_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="只能追加自己生成的考核题。")
+
+    generated_questions = sorted(resource.generated_questions or [], key=lambda item: item.sort_order)
+    if not generated_questions:
+        raise HTTPException(status_code=400, detail="该考核题资源没有结构化题目，无法追加。")
+
+    next_section_order = max([section.sort_order for section in paper.sections] or [0]) + 1
+    section = PaperSection(
+        paper_id=paper.id,
+        section_title=request.section_title or resource.title,
+        source_module_name=resource.title,
+        sort_order=next_section_order
+    )
+    db.add(section)
+    await db.flush()
+
+    total_score = paper.total_score
+    for question_index, generated_question in enumerate(generated_questions, start=1):
+        total_score += float(generated_question.score)
+        db.add(
+            PaperQuestion(
+                paper_id=paper.id,
+                section_id=section.id,
+                question_type=generated_question.question_type,
+                question_content=generated_question.question_content,
+                reference_answer=generated_question.reference_answer,
+                score=generated_question.score,
+                difficulty_level=generated_question.difficulty_level,
+                sort_order=question_index,
+                metadata_json={
+                    **(generated_question.metadata_json or {}),
+                    "options": _normalize_options(generated_question.options_json),
+                    "generated_resource_id": resource.id
+                }
+            )
+        )
+
+    paper.total_score = total_score
+    await db.commit()
+    refreshed = await db.execute(
+        select(Paper).options(selectinload(Paper.sections).selectinload(PaperSection.questions), selectinload(Paper.publications)).where(Paper.id == paper.id)
+    )
+    updated_paper = refreshed.scalar_one()
+    await _log_user_activity(db, current_user.id, "append_generated_questions_to_paper", {"paper_id": paper.id, "resource_id": resource.id})
+    return _paper_to_response(updated_paper)
+
+
+@router.delete("/teacher/papers/{paper_id}", response_model=PaperResponse, summary="教师删除或归档试卷")
+async def delete_teacher_paper_api(
+    paper_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(Paper).options(selectinload(Paper.sections).selectinload(PaperSection.questions), selectinload(Paper.publications)).where(Paper.id == paper_id)
+    )
+    paper = result.scalar_one_or_none()
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+    if current_user.role == "teacher" and paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权删除该试卷。")
+
+    if paper.publications:
+        paper.status = "archived"
+        await db.commit()
+        await db.refresh(paper)
+        await _log_user_activity(db, current_user.id, "archive_paper", {"paper_id": paper.id})
+        return _paper_to_response(paper)
+
+    for section in paper.sections:
+        for question in section.questions:
+            await db.delete(question)
+        await db.delete(section)
+    await db.delete(paper)
+    await db.commit()
+
+    archived_stub = Paper(
+        id=paper.id,
+        title=paper.title,
+        source_resource_id=paper.source_resource_id,
+        created_by_teacher_id=paper.created_by_teacher_id,
+        class_id=paper.class_id,
+        status="deleted",
+        total_score=paper.total_score,
+        metadata_json=paper.metadata_json,
+        created_at=paper.created_at,
+        updated_at=paper.updated_at,
+        sections=[],
+        publications=[]
+    )
+    await _log_user_activity(db, current_user.id, "delete_paper", {"paper_id": paper_id})
+    return _paper_to_response(archived_stub)
+
+
+@router.post("/teacher/papers/{paper_id}/publish", response_model=PaperPublicationResponse, summary="教师发布试卷到班级")
+async def publish_teacher_paper_api(
+    paper_id: str,
+    request: PaperPublicationRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    paper_result = await db.execute(select(Paper).where(Paper.id == paper_id))
+    paper = paper_result.scalar_one_or_none()
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+    if current_user.role == "teacher" and paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权发布该试卷。")
+
+    class_result = await db.execute(select(Classroom).options(selectinload(Classroom.teacher)).where(Classroom.id == request.class_id))
+    classroom = class_result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级不存在。")
+    if current_user.role == "teacher" and classroom.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="只能发布到自己的班级。")
+
+    publication = PaperPublication(
+        paper_id=paper.id,
+        class_id=classroom.id,
+        published_by=current_user.id,
+        deadline=request.deadline,
+        status="published"
+    )
+    db.add(publication)
+    paper.class_id = classroom.id
+    paper.status = "published"
+    await db.commit()
+    await db.refresh(publication)
+    await _log_user_activity(db, current_user.id, "publish_paper", {"paper_id": paper.id, "class_id": classroom.id})
+    return PaperPublicationResponse(
+        id=publication.id,
+        paper_id=publication.paper_id,
+        class_id=publication.class_id,
+        class_name=classroom.name,
+        published_by=publication.published_by,
+        published_at=publication.published_at,
+        deadline=publication.deadline,
+        status=publication.status
+    )
+
+
+@router.get("/teacher/classes/{class_id}/papers", response_model=List[PaperPublicationResponse], summary="教师查看班级已发布试卷")
+async def get_teacher_class_papers_api(
+    class_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    class_result = await db.execute(select(Classroom).options(selectinload(Classroom.teacher)).where(Classroom.id == class_id))
+    classroom = class_result.scalar_one_or_none()
+    if classroom is None:
+        raise HTTPException(status_code=404, detail="班级不存在。")
+    if current_user.role == "teacher" and classroom.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该班级试卷。")
+
+    result = await db.execute(
+        select(PaperPublication)
+        .options(selectinload(PaperPublication.classroom))
+        .where(PaperPublication.class_id == class_id)
+        .order_by(PaperPublication.published_at.desc())
+    )
+    publications = result.scalars().all()
+    return [
+        PaperPublicationResponse(
+            id=publication.id,
+            paper_id=publication.paper_id,
+            class_id=publication.class_id,
+            class_name=publication.classroom.name if publication.classroom else classroom.name,
+            published_by=publication.published_by,
+            published_at=publication.published_at,
+            deadline=publication.deadline,
+            status=publication.status
+        )
+        for publication in publications
+    ]
+
+
+@router.get("/student/classes/{class_id}/papers", response_model=List[StudentPaperListItem], summary="学生查看班级已发布试卷")
+async def get_student_class_papers_api(
+    class_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可查看班级试卷。")
+
+    membership_result = await db.execute(
+        select(ClassMember).where(ClassMember.class_id == class_id, ClassMember.student_id == current_user.id, ClassMember.status == "active")
+    )
+    if membership_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="你未加入该班级。")
+
+    result = await db.execute(
+        select(PaperPublication)
+        .options(
+            selectinload(PaperPublication.paper),
+            selectinload(PaperPublication.classroom),
+            selectinload(PaperPublication.publisher)
+        )
+        .where(PaperPublication.class_id == class_id, PaperPublication.status == "published")
+        .order_by(PaperPublication.published_at.desc())
+    )
+    publications = result.scalars().all()
+    return [
+        StudentPaperListItem(
+            id=publication.paper.id,
+            publication_id=publication.id,
+            title=publication.paper.title,
+            class_name=publication.classroom.name if publication.classroom else "",
+            teacher_name=publication.publisher.username if publication.publisher else "",
+            published_at=publication.published_at,
+            deadline=publication.deadline,
+            status=publication.status,
+            total_score=publication.paper.total_score
+        )
+        for publication in publications if publication.paper
+    ]
+
+
+@router.get("/student/papers/{publication_id}", response_model=StudentPaperDetailResponse, summary="学生获取试卷详情")
+async def get_student_paper_detail_api(
+    publication_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可查看试卷。")
+
+    result = await db.execute(
+        select(PaperPublication)
+        .options(
+            selectinload(PaperPublication.classroom),
+            selectinload(PaperPublication.publisher),
+            selectinload(PaperPublication.paper).selectinload(Paper.sections).selectinload(PaperSection.questions)
+        )
+        .where(PaperPublication.id == publication_id)
+    )
+    publication = result.scalar_one_or_none()
+    if publication is None or publication.paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+
+    membership_result = await db.execute(
+        select(ClassMember).where(
+            ClassMember.class_id == publication.class_id,
+            ClassMember.student_id == current_user.id,
+            ClassMember.status == "active"
+        )
+    )
+    if membership_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="你未加入该班级。")
+
+    return StudentPaperDetailResponse(
+        publication_id=publication.id,
+        paper=_paper_to_student_response(publication.paper),
+        class_name=publication.classroom.name if publication.classroom else "",
+        teacher_name=publication.publisher.username if publication.publisher else "",
+        published_at=publication.published_at,
+        deadline=publication.deadline
+    )
+
+
+@router.post("/student/papers/{publication_id}/submit", response_model=PaperSubmissionResponse, summary="学生提交试卷并即时批改")
+async def submit_student_paper_api(
+    publication_id: str,
+    request: PaperSubmissionRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可提交试卷。")
+
+    result = await db.execute(
+        select(PaperPublication)
+        .options(
+            selectinload(PaperPublication.paper).selectinload(Paper.sections).selectinload(PaperSection.questions),
+            selectinload(PaperPublication.classroom)
+        )
+        .where(PaperPublication.id == publication_id)
+    )
+    publication = result.scalar_one_or_none()
+    if publication is None or publication.paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+
+    membership_result = await db.execute(
+        select(ClassMember).where(
+            ClassMember.class_id == publication.class_id,
+            ClassMember.student_id == current_user.id,
+            ClassMember.status == "active"
+        )
+    )
+    if membership_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="你未加入该班级。")
+
+    existing_result = await db.execute(
+        select(PaperSubmission).where(PaperSubmission.publication_id == publication.id, PaperSubmission.student_id == current_user.id)
+    )
+    if existing_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=400, detail="该试卷已提交，不可重复提交。")
+
+    answer_map = {item.question_id: item.student_answer for item in request.answers}
+    all_questions = [question for section in publication.paper.sections for question in section.questions]
+    if not all_questions:
+        raise HTTPException(status_code=400, detail="试卷没有题目。")
+
+    submission = PaperSubmission(
+        paper_id=publication.paper.id,
+        publication_id=publication.id,
+        student_id=current_user.id,
+        submitted_at=datetime.now(timezone.utc),
+        status="submitted"
+    )
+    db.add(submission)
+    await db.flush()
+
+    total_score = 0.0
+    max_score = 0.0
+    error_items: List[Dict[str, Any]] = []
+    answer_responses: List[PaperSubmissionAnswerResponse] = []
+
+    for question in sorted(all_questions, key=lambda item: (item.section.sort_order if item.section else 0, item.sort_order)):
+        student_answer = answer_map.get(question.id, "").strip()
+        grading = await _grade_paper_answer(question, student_answer)
+        max_score += float(question.score)
+        total_score += grading["score"]
+
+        if grading["error_tags_json"]:
+            error_items.append({
+                "question_id": question.id,
+                "question_type": question.question_type,
+                "summary": grading["error_tags_json"].get("summary"),
+                "errors": grading["error_tags_json"].get("errors", [])
+            })
+
+        submission_answer = PaperSubmissionAnswer(
+            submission_id=submission.id,
+            question_id=question.id,
+            student_answer=student_answer,
+            auto_feedback=grading["auto_feedback"],
+            score=grading["score"],
+            is_correct=grading["is_correct"],
+            error_tags_json=grading["error_tags_json"],
+            corrected_at=datetime.now(timezone.utc)
+        )
+        db.add(submission_answer)
+        await db.flush()
+
+        answer_responses.append(
+            PaperSubmissionAnswerResponse(
+                id=submission_answer.id,
+                question_id=question.id,
+                question_content=question.question_content,
+                question_type=question.question_type,
+                reference_answer=question.reference_answer,
+                student_answer=student_answer,
+                auto_feedback=grading["auto_feedback"],
+                score=grading["score"],
+                max_score=question.score,
+                is_correct=grading["is_correct"],
+                error_tags_json=grading["error_tags_json"],
+                corrected_at=submission_answer.corrected_at
+            )
+        )
+
+    submission.total_score = total_score
+    submission.correctness_percentage = (total_score / max_score) if max_score > 0 else 0.0
+    submission.error_analysis_json = {"items": error_items}
+
+    db.add(
+        StudentPerformance(
+            student_id=current_user.id,
+            resource_id=publication.paper.source_resource_id,
+            score=total_score,
+            total_score=max_score,
+            correctness_percentage=submission.correctness_percentage,
+            error_analysis_json=submission.error_analysis_json,
+            assessment_type="paper_submission"
+        )
+    )
+
+    await db.commit()
+    await db.refresh(submission)
+    await _log_user_activity(db, current_user.id, "submit_paper", {"publication_id": publication.id, "paper_id": publication.paper.id, "total_score": total_score})
+
+    return PaperSubmissionResponse(
+        id=submission.id,
+        paper_id=submission.paper_id,
+        publication_id=submission.publication_id,
+        student_id=submission.student_id,
+        student_name=current_user.username,
+        submitted_at=submission.submitted_at,
+        status=submission.status,
+        total_score=total_score,
+        max_score=max_score,
+        correctness_percentage=submission.correctness_percentage,
+        error_analysis_json=submission.error_analysis_json,
+        answers=answer_responses
+    )
+
+
+@router.get("/student/submissions/{submission_id}", response_model=PaperSubmissionResponse, summary="学生查看自己的试卷批改结果")
+async def get_student_submission_api(
+    submission_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可查看提交结果。")
+
+    result = await db.execute(
+        select(PaperSubmission)
+        .options(
+            selectinload(PaperSubmission.answers).selectinload(PaperSubmissionAnswer.question),
+            selectinload(PaperSubmission.student)
+        )
+        .where(PaperSubmission.id == submission_id, PaperSubmission.student_id == current_user.id)
+    )
+    submission = result.scalar_one_or_none()
+    if submission is None:
+        raise HTTPException(status_code=404, detail="提交记录不存在。")
+
+    max_score = sum((answer.question.score if answer.question else 0) for answer in submission.answers)
+    return PaperSubmissionResponse(
+        id=submission.id,
+        paper_id=submission.paper_id,
+        publication_id=submission.publication_id,
+        student_id=submission.student_id,
+        student_name=submission.student.username if submission.student else current_user.username,
+        submitted_at=submission.submitted_at,
+        status=submission.status,
+        total_score=submission.total_score,
+        max_score=max_score,
+        correctness_percentage=submission.correctness_percentage,
+        error_analysis_json=submission.error_analysis_json,
+        answers=[
+            PaperSubmissionAnswerResponse(
+                id=answer.id,
+                question_id=answer.question_id,
+                question_content=answer.question.question_content if answer.question else "",
+                question_type=answer.question.question_type if answer.question else "",
+                reference_answer=answer.question.reference_answer if answer.question else None,
+                student_answer=answer.student_answer,
+                auto_feedback=answer.auto_feedback,
+                score=answer.score,
+                max_score=answer.question.score if answer.question else 0,
+                is_correct=answer.is_correct,
+                error_tags_json=answer.error_tags_json,
+                corrected_at=answer.corrected_at
+            )
+            for answer in submission.answers
+        ]
+    )
+
+
+@router.get("/teacher/papers/{paper_id}/submissions", response_model=List[TeacherPaperSubmissionSummary], summary="教师查看试卷提交情况")
+async def get_teacher_paper_submissions_api(
+    paper_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    paper_result = await db.execute(select(Paper).where(Paper.id == paper_id))
+    paper = paper_result.scalar_one_or_none()
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在。")
+    if current_user.role == "teacher" and paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该试卷提交情况。")
+
+    result = await db.execute(
+        select(PaperSubmission)
+        .options(selectinload(PaperSubmission.answers).selectinload(PaperSubmissionAnswer.question), selectinload(PaperSubmission.student))
+        .where(PaperSubmission.paper_id == paper_id)
+        .order_by(PaperSubmission.submitted_at.desc())
+    )
+    submissions = result.scalars().all()
+    return [
+        TeacherPaperSubmissionSummary(
+            id=submission.id,
+            student_id=submission.student_id,
+            student_name=submission.student.username if submission.student else f"学生{submission.student_id}",
+            submitted_at=submission.submitted_at,
+            total_score=submission.total_score,
+            max_score=sum((answer.question.score if answer.question else 0) for answer in submission.answers),
+            correctness_percentage=submission.correctness_percentage,
+            status=submission.status
+        )
+        for submission in submissions
+    ]
+
+
+@router.get("/teacher/submissions/{submission_id}", response_model=PaperSubmissionResponse, summary="教师查看单份试卷批改详情")
+async def get_teacher_submission_detail_api(
+    submission_id: str,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="无教师或管理员权限。")
+
+    result = await db.execute(
+        select(PaperSubmission)
+        .options(
+            selectinload(PaperSubmission.paper),
+            selectinload(PaperSubmission.answers).selectinload(PaperSubmissionAnswer.question),
+            selectinload(PaperSubmission.student)
+        )
+        .where(PaperSubmission.id == submission_id)
+    )
+    submission = result.scalar_one_or_none()
+    if submission is None or submission.paper is None:
+        raise HTTPException(status_code=404, detail="提交记录不存在。")
+    if current_user.role == "teacher" and submission.paper.created_by_teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看该提交记录。")
+
+    max_score = sum((answer.question.score if answer.question else 0) for answer in submission.answers)
+    return PaperSubmissionResponse(
+        id=submission.id,
+        paper_id=submission.paper_id,
+        publication_id=submission.publication_id,
+        student_id=submission.student_id,
+        student_name=submission.student.username if submission.student else f"学生{submission.student_id}",
+        submitted_at=submission.submitted_at,
+        status=submission.status,
+        total_score=submission.total_score,
+        max_score=max_score,
+        correctness_percentage=submission.correctness_percentage,
+        error_analysis_json=submission.error_analysis_json,
+        answers=[
+            PaperSubmissionAnswerResponse(
+                id=answer.id,
+                question_id=answer.question_id,
+                question_content=answer.question.question_content if answer.question else "",
+                question_type=answer.question.question_type if answer.question else "",
+                reference_answer=answer.question.reference_answer if answer.question else None,
+                student_answer=answer.student_answer,
+                auto_feedback=answer.auto_feedback,
+                score=answer.score,
+                max_score=answer.question.score if answer.question else 0,
+                is_correct=answer.is_correct,
+                error_tags_json=answer.error_tags_json,
+                corrected_at=answer.corrected_at
+            )
+            for answer in submission.answers
+        ]
+    )
+
+
 #教师API(所有教师侧API都需要教师或管理员权限)-----------------
+
+# 流式生成教学内容并在完成后自动保存
+@router.post("/teacher/lesson_plan/generate/stream", summary="流式生成教学内容和备课计划")
+async def generate_lesson_plan_stream_api(
+    request: LessonPlanRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无教师或管理员权限。")
+
+    current_user_id = current_user.id
+    start_time_log = datetime.now(timezone.utc)
+
+    system_instruction = f"你是一位资深的{request.course_level}级别《嵌入式Linux开发实践教程》课程设计师和教育专家。"
+    user_question = f"""请根据以下课程大纲，设计一份详细的教学内容。
+    内容应包括：
+    1. 知识讲解点（条理清晰，有深度，可分多级标题）
+    2. 相关的实训练习建议（具体，可操作，包含目标、步骤和预期结果）
+    3. 时间分布建议（例如，每部分大致需要多长时间，总时长{'约' + str(request.expected_duration_hours) + '小时' if request.expected_duration_hours else '合理分配'}）
+
+    课程大纲：
+    ---
+    {request.course_outline}
+    ---
+    """
+    final_instruction = (
+        "请给出完整、详细且可直接使用的课程设计，格式清晰，便于教师直接使用。"
+        "如果内容较长，也必须完整输出，不要中途省略、不要用“以下略”“后续同理”等简写结束。"
+        "请确保最后一节内容、实践安排和时间分配完整收尾。"
+    )
+
+    async def generate():
+        chunks: List[str] = []
+        for chunk in stream_text_with_qwen3(
+            system_instruction=system_instruction,
+            user_question=user_question,
+            retrieved_documents_content=[],
+            final_instruction=final_instruction,
+            max_new_tokens=None,
+            temperature=0.7,
+            top_p=0.9
+        ):
+            chunks.append(chunk)
+            yield chunk
+
+        lesson_plan_content = "".join(chunks).strip()
+        if not lesson_plan_content:
+            return
+
+        resource_id = str(uuid.uuid4())
+        file_dir = "generated_resources/lesson_plans"
+        os.makedirs(file_dir, exist_ok=True)
+        file_path = os.path.join(file_dir, f"{resource_id}.md")
+        _write_resource_file(file_path, lesson_plan_content)
+
+        new_resource = Resource(
+            id=resource_id,
+            title=request.course_outline[:200],
+            resource_type="lesson_plan",
+            created_by_user_id=current_user_id,
+            subject=request.subject,
+            file_path=file_path,
+            metadata_json={
+                "course_level": request.course_level,
+                "expected_duration_hours": request.expected_duration_hours,
+                "generated_by": "stream"
+            }
+        )
+        db.add(new_resource)
+        await db.flush()
+
+        lesson_plan_log_entry = LessonPlanTimeLog(
+            user_id=current_user_id,
+            resource_id=new_resource.id,
+            start_time=start_time_log,
+            end_time=datetime.now(timezone.utc)
+        )
+        db.add(lesson_plan_log_entry)
+        await db.commit()
+        await _log_user_activity(
+            db,
+            current_user_id,
+            "generate_lesson_plan_stream",
+            {"resource_id": str(new_resource.id), "subject": request.subject}
+        )
+
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
 #根据课程大纲、知识库、课程级别和期望时长，自动生成详细的教学内容（知识讲解、实训练习、时间分布）
 @router.post("/teacher/lesson_plan/generate", response_model=LessonPlanResponse, summary="生成教学内容和备课计划")
@@ -282,10 +2219,6 @@ async def generate_lesson_plan_api(request: LessonPlanRequest,current_user: User
         print(f"写入备课计划内容到文件失败: {e}")
         raise HTTPException(status_code=500, detail=f"文件写入失败: {e}")
 
-    # --- 存储生成的备课内容到数据库 ---
-    resource_id = str(uuid.uuid4())
-    file_path = f"generated_resources/lesson_plans/{resource_id}.md"
-
     new_resource = Resource(
         id=resource_id,
         title=request.course_outline[:200],
@@ -339,68 +2272,15 @@ async def generate_assessment_api(request: AssessmentQuestionRequest,current_use
     # 根据编程语言提供提示，如果指定了的话
     programming_lang_hint = f"使用 {request.programming_language} 语言" if request.programming_language else ""
 
-    # --- 根据 question_type 动态生成格式示例 ---
-    format_example_content = ""
-    if request.question_type == "选择题":
-        format_example_content = """
-    题目1: [题目内容]
-    A. 选项A
-    B. 选项B
-    C. 选项C
-    D. 选项D
-    参考答案1: [正确选项，例如：A]
-
-    题目2: ...
-    参考答案2: ...
-    """
-    elif request.question_type == "编程题":
-        # 确保代码块语言是小写，例如 "python" 而不是 "Python"
-        lang_for_code_block = request.programming_language.lower() if request.programming_language else "python"
-        format_example_content = f"""
-    题目1: [题目内容]
-    参考答案1:
-    ```{lang_for_code_block}
-    <完整的可运行代码>
-    ```
-    代码解释: [详细解释代码的逻辑和每部分的作用，包括必要的库导入和错误处理建议]
-
-    题目2: ...
-    参考答案2: ...
-    """
-    else:  # 填空题、简答题、问答题等通用格式
-        format_example_content = """
-    题目1: [题目内容]
-    参考答案1: [参考答案内容]
-
-    题目2: ...
-    参考答案2: ...
-    """
-
-    # 构建 LLM 的系统指令 (System Instruction)
-    system_instruction = f"你是一位专业的嵌入式Linux开发实践教程命题专家，擅长生成各种类型和难度的考核题目及参考答案。"
-
-    # 构建 LLM 的用户问题 (User Question)
-    user_question = f"""请为主题“{request.topic}”生成 {request.num_questions} 道{request.difficulty_level}难度的{request.question_type}。
-    {programming_lang_hint}
-    要求每道题目清晰，具有代表性。如果生成编程题，请同时提供完整的、**可直接运行**的参考代码和**详细的解释**，并**包含所有必要的库导入**和**常见错误处理**。
-
-    请严格按照以下格式生成题目和答案，**确保只生成 {request.num_questions} 道题目，不多也不少**：
-    ---
-    {format_example_content.strip()}
-    ---
-    """
-    # 构建 LLM 的最终指令 (Final Instruction)
-    final_instruction = "请严格按照上述格式生成题目和答案，不要包含任何额外说明或分析文字。只返回题目和答案内容本身。"
-
-    assessment_content = await _get_llm_response(
-        system_instruction=system_instruction,
-        user_question=user_question,
-        retrieved_documents_content=retrieved_docs_content,
-        final_instruction=final_instruction,
-        max_new_tokens=2000,
-        temperature=0.7,
-        top_p=0.9
+    generated_questions = await _generate_structured_questions(
+        topic_or_title=request.topic,
+        source_content=f"{request.topic}\n{programming_lang_hint}",
+        question_type=request.question_type,
+        difficulty_level=request.difficulty_level,
+        num_questions=request.num_questions,
+        retrieved_documents_content=retrieved_docs_content
     )
+    assessment_content = _render_questions_markdown(f"{request.topic} - {request.question_type}考核题", generated_questions)
 
     # --- 新增：存储生成的考核内容到文件系统 ---
     resource_id = str(uuid.uuid4())
@@ -435,6 +2315,8 @@ async def generate_assessment_api(request: AssessmentQuestionRequest,current_use
         subject = request.subject if request.subject else request.topic # <-- 推荐的修改：优先使用 request.subject，否则使用 request.topic
     )
     db.add(new_resource)
+    await db.flush()
+    await _replace_generated_questions(db, new_resource.id, generated_questions)
     await db.commit()
     await db.refresh(new_resource)
 
@@ -446,8 +2328,17 @@ async def generate_assessment_api(request: AssessmentQuestionRequest,current_use
                               "question_type": request.question_type,
                               "difficulty_level": request.difficulty_level})
 
-    return AssessmentQuestionResponse(status="success", assessment_content=assessment_content,
-                                      generated_at=datetime.now(), resource_id=new_resource.id)
+    refreshed = await db.execute(
+        select(Resource).options(selectinload(Resource.generated_questions)).where(Resource.id == new_resource.id)
+    )
+    refreshed_resource = refreshed.scalar_one()
+    return AssessmentQuestionResponse(
+        status="success",
+        assessment_content=assessment_content,
+        generated_at=datetime.now(),
+        resource_id=new_resource.id,
+        questions=[_generated_question_to_response(question) for question in sorted(refreshed_resource.generated_questions, key=lambda item: item.sort_order)]
+    )
 
 #自动化检测学生答案，提供错误定位与修正建议；分析学生整体数据，总结知识掌握情况
 @router.post("/teacher/student_answer/correct", response_model=CorrectionFeedbackResponse, summary="自动化检测学生答案，提供错误定位与修正建议")
@@ -494,7 +2385,7 @@ async def correct_student_answer_api(request: StudentAnswerCorrectionRequest,cur
         user_question=user_question,
         retrieved_documents_content=retrieved_docs_content,
         final_instruction=final_instruction,
-        max_new_tokens=700,
+        max_new_tokens=None,
         temperature=0.7,
         top_p=0.9
     )
@@ -575,7 +2466,7 @@ async def ask_student_assistant_api(request: StudentQuestionRequest,current_user
         user_question=request.question,
         retrieved_documents_content=retrieved_docs_content,
         final_instruction=final_instruction,
-        max_new_tokens=800,
+        max_new_tokens=None,
         temperature=0.7,
         top_p=0.9
     )
@@ -611,7 +2502,7 @@ async def ask_student_assistant_stream_api(
                 user_question=request.question,
                 retrieved_documents_content=retrieved_docs_content,
                 final_instruction=final_instruction,
-                max_new_tokens=800,
+                max_new_tokens=None,
                 temperature=0.7,
                 top_p=0.9
             ):
@@ -645,46 +2536,15 @@ async def generate_practice_question_api(request: PracticeQuestionRequest,curren
     if request.topic_focus:
         retrieved_docs_content = await _get_retrieved_docs(request.topic_focus, k=3)
 
-    system_instruction = "你是一名专业的教学助手，擅长根据知识点生成合适的练习题目。"
-    topic_hint = f"（侧重知识点：{request.topic_focus}）" if request.topic_focus else ""
-
-    # --- 根据 request.question_type 动态调整题目类型提示 ---
-    type_instruction = ""
-    if request.question_type == "混合":
-        type_instruction = "题目可以是选择题、填空题、简答题或小型编程片段。"
-    elif request.question_type == "编程题":
-        type_instruction = "只生成小型编程题目。"
-    else:
-        type_instruction = f"只生成{request.question_type}。"
-
-    user_question = f"""请为学生ID为“{current_user_id}”生成 {request.num_questions} 道关于《嵌入式Linux开发实践教程》的随练题目{topic_hint}。
-    {type_instruction} 请给出题目和参考答案。
-
-    生成格式示例（请按此格式返回）：
-    ---
-    题目1: [题目内容]
-    参考答案1: [参考答案内容]
-    [编程题：
-    ```<lang>
-    <代码>
-    ```
-    代码解释：...]
-
-    题目2: ...
-    参考答案2: ...
-    ---
-    """
-    final_instruction = "请严格按照上述格式生成题目和答案。"
-
-    practice_content = await _get_llm_response(
-        system_instruction=system_instruction,
-        user_question=user_question,
-        retrieved_documents_content=retrieved_docs_content,
-        final_instruction=final_instruction,
-        max_new_tokens=800,
-        temperature=0.7,
-        top_p=0.9
+    generated_questions = await _generate_structured_questions(
+        topic_or_title=request.topic_focus or "综合练习",
+        source_content=request.topic_focus or "请围绕当前课程知识点生成练习题。",
+        question_type=request.question_type or "混合",
+        difficulty_level="中等",
+        num_questions=request.num_questions,
+        retrieved_documents_content=retrieved_docs_content
     )
+    practice_content = _render_questions_markdown(f"{request.topic_focus or '综合'}练习题", generated_questions)
 
     # --- 存储生成的练习内容到文件系统 ---
     resource_id = str(uuid.uuid4())
@@ -717,6 +2577,8 @@ async def generate_practice_question_api(request: PracticeQuestionRequest,curren
         subject=request.topic_focus
     )
     db.add(new_resource)
+    await db.flush()
+    await _replace_generated_questions(db, new_resource.id, generated_questions)
     await db.commit()
     await db.refresh(new_resource)
 
@@ -727,8 +2589,95 @@ async def generate_practice_question_api(request: PracticeQuestionRequest,curren
                               "num_questions": request.num_questions,
                               "question_type": request.question_type}) # 记录题型
 
-    return PracticeQuestionResponse(status="success", practice_questions=practice_content,
-                                    generated_at=datetime.now(), resource_id=new_resource.id)
+    refreshed = await db.execute(
+        select(Resource).options(selectinload(Resource.generated_questions)).where(Resource.id == new_resource.id)
+    )
+    refreshed_resource = refreshed.scalar_one()
+    return PracticeQuestionResponse(
+        status="success",
+        practice_questions=practice_content,
+        generated_at=datetime.now(),
+        resource_id=new_resource.id,
+        questions=[_generated_question_to_response(question) for question in sorted(refreshed_resource.generated_questions, key=lambda item: item.sort_order)]
+    )
+
+
+@router.post("/student/practices/{resource_id}/submit", response_model=PracticeSubmissionResponse, summary="学生提交结构化练习并即时批改")
+async def submit_generated_practice_api(
+    resource_id: str,
+    request: PracticeSubmissionRequest,
+    current_user: User = Depends(get_current_user_simple),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="仅学生可提交自己的练习。")
+
+    result = await db.execute(
+        select(Resource)
+        .options(selectinload(Resource.generated_questions))
+        .where(Resource.id == resource_id, Resource.resource_type == "practice", Resource.created_by_user_id == current_user.id)
+    )
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(status_code=404, detail="练习资源不存在。")
+
+    questions = sorted(resource.generated_questions or [], key=lambda item: item.sort_order)
+    if not questions:
+        raise HTTPException(status_code=400, detail="该练习没有结构化题目。")
+
+    answer_map = {item.question_id: item.student_answer for item in request.answers}
+    total_score = 0.0
+    max_score = 0.0
+    responses: List[PracticeSubmissionAnswerResponse] = []
+
+    for question in questions:
+        student_answer = (answer_map.get(question.id) or "").strip()
+        grading = await _grade_answer_with_model(
+            question_type=question.question_type,
+            question_content=question.question_content,
+            reference_answer=question.reference_answer,
+            score=float(question.score),
+            student_answer=student_answer,
+            options=_normalize_options(question.options_json)
+        )
+        total_score += grading["score"]
+        max_score += float(question.score)
+        responses.append(
+            PracticeSubmissionAnswerResponse(
+                question_id=question.id,
+                question_content=question.question_content,
+                question_type=question.question_type,
+                reference_answer=question.reference_answer,
+                student_answer=student_answer,
+                auto_feedback=grading["auto_feedback"],
+                score=grading["score"],
+                max_score=float(question.score),
+                is_correct=grading["is_correct"],
+                error_tags_json=grading["error_tags_json"]
+            )
+        )
+
+    correctness_percentage = (total_score / max_score) if max_score > 0 else 0.0
+    db.add(
+        StudentPerformance(
+            student_id=current_user.id,
+            resource_id=resource.id,
+            score=total_score,
+            total_score=max_score,
+            correctness_percentage=correctness_percentage,
+            error_analysis_json={"items": [item.error_tags_json for item in responses if item.error_tags_json]},
+            assessment_type="practice_submission"
+        )
+    )
+    await db.commit()
+    await _log_user_activity(db, current_user.id, "submit_practice", {"resource_id": resource_id, "total_score": total_score})
+    return PracticeSubmissionResponse(
+        resource_id=resource.id,
+        total_score=total_score,
+        max_score=max_score,
+        correctness_percentage=correctness_percentage,
+        answers=responses
+    )
 
 #学生题目修改
 @router.post("/student/practice/correct", response_model=CorrectionFeedbackResponse, summary="实时练习评测助手：纠错学生练习答案")
@@ -764,7 +2713,7 @@ async def correct_practice_answer_api(
             user_question=reference_answer_user_question,
             retrieved_documents_content=retrieved_docs_content,
             final_instruction=reference_answer_final_instruction,
-            max_new_tokens=500,
+            max_new_tokens=None,
             temperature=0.5,
             top_p=0.8
         )
@@ -792,7 +2741,7 @@ async def correct_practice_answer_api(
             user_question=user_question,
             retrieved_documents_content=retrieved_docs_content,
             final_instruction=final_instruction,
-            max_new_tokens=500,
+            max_new_tokens=None,
             temperature=0.7,
             top_p=0.9
         )
