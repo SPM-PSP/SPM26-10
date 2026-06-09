@@ -103,7 +103,7 @@ flowchart TB
     Service --> Files[(本地生成资源文件)]
     RAG --> Chroma[(ChromaDB 向量数据库)]
     RAG --> Embed["BGE-small-zh-v1.5 嵌入模型"]
-    RAG --> LLM["Qwen3-0.6B / 云端模型 API / Hybrid"]
+    RAG --> LLM["本地模型部署 / 云端模型 API (DeepSeek-V4) / Hybrid"]
 ```
 
 ```mermaid
@@ -126,7 +126,7 @@ flowchart LR
 | 前端 | Vue3、Vite、TypeScript、Naive UI、Pinia、Axios |
 | 后端 | FastAPI、Uvicorn、Pydantic、SQLAlchemy Async |
 | 数据库 | MySQL、ChromaDB、本地 Markdown 文件存储 |
-| AI / RAG | Qwen3-0.6B、OpenAI-compatible API、BAAI/bge-small-zh-v1.5、LangChain、Sentence Transformers |
+| AI / RAG | OpenAI-compatible API(DeepSeek-V4)、BAAI/bge-small-zh-v1.5、LangChain、Sentence Transformers |
 | 文档处理 | PDF、DOCX、DOC、TXT、Markdown 递归加载与切片 |
 
 ## 知识库与模型
